@@ -1,0 +1,11 @@
+[versions]
+agp = "8.9.1"
+libxposedApi = "102.0.0"
+shadowhook = "1.1.1"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+
+[libraries]
+libxposed-api = { group = "io.github.libxposed", name = "api", version.ref = "libxposedApi" }
+shadowhook = { group = "com.bytedance.android", name = "shadowhook", version.ref = "shadowhook" }
