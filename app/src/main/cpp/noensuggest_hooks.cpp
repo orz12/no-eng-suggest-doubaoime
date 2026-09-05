@@ -48,6 +48,56 @@ std::atomic<int> g_allow_direct_commit{0};
 std::atomic<bool> g_diag_last_board_was_english{false};
 size_t g_commit_str_off = kCommitStrOffsetFallback;
 size_t g_behavior_off = 0;
+int g_hook_total_count = 0;
+int g_hook_ok_count = 0;
+int g_hook_fail_count = 0;
+int g_hook_skip_count = 0;
+char g_hook_fail_names[384] = {0};
+char g_hook_skip_names[384] = {0};
+char g_hook_status_map[4096] = {0};
+
+static void append_hook_named_list(char *buf, size_t cap, const char *name) {
+    if (name == nullptr || name[0] == '\0' || cap == 0) {
+        return;
+    }
+    size_t used = strnlen(buf, cap);
+    size_t nlen = strnlen(name, 120);
+    if (used + nlen + 2 >= cap) {
+        return;
+    }
+    if (used > 0) {
+        buf[used++] = ',';
+        buf[used] = '\0';
+    }
+    memcpy(buf + used, name, nlen);
+    buf[used + nlen] = '\0';
+}
+
+static void append_hook_status(const char *name, const char *status) {
+    if (name == nullptr || status == nullptr) {
+        return;
+    }
+    size_t used = strnlen(g_hook_status_map, sizeof(g_hook_status_map));
+    size_t nlen = strnlen(name, 120);
+    size_t slen = strnlen(status, 16);
+    // name=status;
+    if (used + nlen + slen + 3 >= sizeof(g_hook_status_map)) {
+        return;
+    }
+    memcpy(g_hook_status_map + used, name, nlen);
+    used += nlen;
+    g_hook_status_map[used++] = '=';
+    memcpy(g_hook_status_map + used, status, slen);
+    used += slen;
+    g_hook_status_map[used++] = ';';
+    g_hook_status_map[used] = '\0';
+}
+
+
+static void append_hook_fail_name(const char *name) {
+    append_hook_named_list(g_hook_fail_names, sizeof(g_hook_fail_names), name);
+}
+
 pthread_mutex_t g_file_mu = PTHREAD_MUTEX_INITIALIZER;
 
 using FnInputModelGetInstance = void *(*)();
@@ -96,6 +146,11 @@ using FnNotifyInt = void (*)(void *, int);
 using FnCandidateSnapshot =
         void (*)(void *, const void *, const void *, int, int, int, int, int, int, int);
 using FnJniDoUpClearAction = void (*)(void *, void *, int, unsigned char);
+using FnTranslateGetInstance = void *(*)();
+using FnTranslateGetActivation = bool (*)(void *);
+using FnTranslateDelayRefresh = void (*)(void *);
+using FnTranslateBoxGetInstance = void *(*)();
+using FnTranslateBoxIsEnabled = bool (*)(void *);
 
 FnInputModelGetInstance InputModel_GetInstance = nullptr;
 FnInputModelGetInputMode InputModel_GetInputMode = nullptr;
@@ -133,6 +188,14 @@ void *sym_English26_OnSelectionUpdated = nullptr;
 void *sym_Jni_DoUpClearAction = nullptr;
 void *sym_InputBoxScreen_UpClear = nullptr;
 void *sym_InputBoxTranslate_UpClear = nullptr;
+void *sym_Translate_DelayRefreshResponse = nullptr;
+FnTranslateGetInstance TranslateModel_GetInstance = nullptr;
+FnTranslateGetActivation TranslateModel_GetTranslateActivation = nullptr;
+FnTranslateDelayRefresh orig_Translate_DelayRefreshResponse = nullptr;
+FnTranslateBoxGetInstance InputBoxTranslate_GetInstance = nullptr;
+FnTranslateBoxIsEnabled InputBoxTranslate_IsEnabled = nullptr;
+/** DelayRefreshResponse 调用栈深度：翻译刷新期间禁止 Clear/吞 preedit。 */
+thread_local int g_in_translate_refresh = 0;
 void *sym_Backspace_OnButtonDown = nullptr;
 void *sym_Backspace_ShowUpClear = nullptr;
 void *sym_Backspace_OnButtonUp = nullptr;
@@ -256,6 +319,9 @@ bool is_english_mode(int mode) {
 int current_board_type();
 int current_input_mode();
 bool is_english_ui();
+bool is_translate_panel_active();
+bool should_apply_english_direct();
+bool should_swallow_english_preedit();
 bool is_password_box();
 void discard_preedit_once(const char *reason);
 void mark_skip_associate();
@@ -635,11 +701,23 @@ bool resolve_symbols() {
             dynsym_find(&idx, "_ZN2ui15English26Layout26OnButtonEnglishCharClickedEv", false);
     sym_English26_OnSelectionUpdated =
             dynsym_find(&idx, "_ZN2ui15English26Layout18OnSelectionUpdatedEv", false);
-    sym_Jni_DoUpClearAction = dynsym_find(&idx, "Jni_DoUpClearAction", false);
+    // Exported as Itanium-mangled C++ name, not the bare "Jni_DoUpClearAction".
+    sym_Jni_DoUpClearAction = dynsym_find(
+            &idx, "_Z19Jni_DoUpClearActionP7_JNIEnvP8_jobjectih", false);
     sym_InputBoxScreen_UpClear =
             dynsym_find(&idx, "_ZN5input19InputBoxScreenModel7UpClearEv", false);
     sym_InputBoxTranslate_UpClear =
             dynsym_find(&idx, "_ZN5input22InputBoxTranslateModel7UpClearEv", false);
+    TranslateModel_GetInstance = reinterpret_cast<FnTranslateGetInstance>(dynsym_find(
+            &idx, "_ZN9translate14TranslateModel11GetInstanceEv", false));
+    TranslateModel_GetTranslateActivation = reinterpret_cast<FnTranslateGetActivation>(dynsym_find(
+            &idx, "_ZNK9translate14TranslateModel22GetTranslateActivationEv", false));
+    sym_Translate_DelayRefreshResponse = dynsym_find(
+            &idx, "_ZN9translate14TranslateModel20DelayRefreshResponseEv", false);
+    InputBoxTranslate_GetInstance = reinterpret_cast<FnTranslateBoxGetInstance>(dynsym_find(
+            &idx, "_ZN5input22InputBoxTranslateModel11GetInstanceEv", false));
+    InputBoxTranslate_IsEnabled = reinterpret_cast<FnTranslateBoxIsEnabled>(dynsym_find(
+            &idx, "_ZN5input22InputBoxTranslateModel9IsEnabledEv", false));
     sym_Backspace_OnButtonDown =
             dynsym_find(&idx, "_ZN2ui15ButtonBackspace12OnButtonDownENS_8tagPOINTE", false);
     sym_Backspace_ShowUpClear =
@@ -839,6 +917,43 @@ bool is_english_ui() {
     return is_english_mode(current_input_mode());
 }
 
+/** 翻译面板激活（含 DelayRefreshResponse 调用栈）。 */
+bool is_translate_panel_active() {
+    if (g_in_translate_refresh > 0) {
+        return true;
+    }
+    if (TranslateModel_GetInstance != nullptr &&
+        TranslateModel_GetTranslateActivation != nullptr) {
+        void *tm = TranslateModel_GetInstance();
+        if (tm != nullptr && TranslateModel_GetTranslateActivation(tm)) {
+            return true;
+        }
+    }
+    if (InputBoxTranslate_GetInstance != nullptr && InputBoxTranslate_IsEnabled != nullptr) {
+        void *box = InputBoxTranslate_GetInstance();
+        if (box != nullptr && InputBoxTranslate_IsEnabled(box)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 英文直输按键路径：翻译面板内也要拦截 CommitInput，否则按下字母会先进入
+ * OIME 预编辑，上滑/长按再提交符号或大写时变成「h(」「hH」。
+ */
+bool should_apply_english_direct() {
+    return is_english_ui();
+}
+
+/**
+ * 吞英文 UpdatePreedit / 拦截整词提交 / FinishPreedit 强制丢弃：
+ * 翻译刷新必须放行，否则结果无法上屏，且 Clear 会与 DelayRefresh 死锁。
+ */
+bool should_swallow_english_preedit() {
+    return is_english_ui() && !is_translate_panel_active();
+}
+
 /**
  * 与 ButtonEnglishChar::OnButtonUp 使用同一条判定：当前 InputBox 虚表 +0x40
  * 即 IsPasswordBox。密码框会由原抬键自行 CommitString，模块不得再预提交。
@@ -908,7 +1023,7 @@ void discard_preedit_once(const char *reason) {
 }
 
 bool should_bypass_english_associate() {
-    return is_english_ui();
+    return should_apply_english_direct();
 }
 
 void note_assoc_bypass(const char *tag) {
@@ -934,6 +1049,21 @@ void mark_skip_associate() {
 /** 真正清除 InputModel/Impl 的 typing buffer；候选管理器 Clear 不能替代它。 */
 void clear_english_engine_state(const char *reason) {
     if (InputModel_Clear == nullptr || InputModel_GetInstance == nullptr) {
+        return;
+    }
+    // 仅在 DelayRefreshResponse 调用栈内禁止 Clear：此时 Clear 会重入 TranslateText
+    // 造成死锁。翻译面板其它时刻（退格/空格/手势收尾）必须允许清残留词态，
+    // 否则会出现「隐式预编辑」，空格/删除要多按一次。
+    if (g_in_translate_refresh > 0) {
+        static std::atomic<int> skip{0};
+        int c = ++skip;
+        if (c <= 40 || (c % 10) == 0) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "skip clear ENG engine (in translate refresh) #%d reason=%s", c,
+                     reason ? reason : "?");
+            log_both(buf);
+        }
         return;
     }
     void *im = InputModel_GetInstance();
@@ -992,7 +1122,8 @@ bool is_ascii_alnum(char c) {
 
 /** 英文下拦截「词态缓冲上屏」：非授权提交且含字母数字则丢弃。纯符号放行。 */
 bool should_block_english_bulk_commit(const void *str) {
-    if (!is_english_ui()) {
+    // 翻译面板可能整词提交译文，不得按英文联想词拦截。
+    if (!should_swallow_english_preedit()) {
         return false;
     }
     if (g_allow_direct_commit.load() > 0) {
@@ -1118,7 +1249,7 @@ bool commit_ascii_keycode(int keycode, const char *source, bool expect_ui_tail =
  * 比 OnButtonUp 的直接提交更早。必须在这个源头短路，否则只会隐藏 preedit。
  */
 void fake_ButtonChar_CommitInput(void *self, uint64_t point) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("block ENG ButtonChar::CommitInput preedit source", ++n);
         return;
@@ -1134,8 +1265,7 @@ void fake_OnButtonUp(void *self, uint64_t point) {
     }
     int mode = current_input_mode();
     int behavior = current_keyboard_behavior();
-    int board = current_board_type();
-    bool eng = board == 2 || is_english_mode(mode);
+    bool eng = should_apply_english_direct();
     static std::atomic<int> seen{0};
     int n = ++seen;
     if (n <= 120 || (n % 20) == 0) {
@@ -1176,6 +1306,12 @@ void fake_OnButtonUp(void *self, uint64_t point) {
     orig_OnButtonUp(self, point);
     mark_skip_associate();
     clear_english_candidate_state("EngChar-tail");
+    // 长按(5)/上滑(6) 走原路径提交大写或符号时，引擎可能留下不可见词态；
+    // 普通直提(1) 也会残留，收尾统一清掉，避免空格/退格多按一次。
+    if (eng) {
+        clear_english_engine_state("EngChar-tail");
+        discard_preedit_once("EngChar-tail");
+    }
 }
 
 void fake_ButtonChar_OnButtonUp(void *self, uint64_t point) {
@@ -1184,8 +1320,7 @@ void fake_ButtonChar_OnButtonUp(void *self, uint64_t point) {
     }
     int mode = current_input_mode();
     int behavior = current_keyboard_behavior();
-    int board = current_board_type();
-    bool eng = board == 2 || is_english_mode(mode);
+    bool eng = should_apply_english_direct();
     static std::atomic<int> seen{0};
     int n = ++seen;
     if (n <= 120 || (n % 20) == 0) {
@@ -1212,7 +1347,7 @@ void fake_PushCommit_OnButtonUp(void *self, uint64_t point) {
         log_both(buf);
     }
     orig_PushCommit_OnButtonUp(self, point);
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         mark_skip_associate();
     }
 }
@@ -1229,7 +1364,7 @@ void fake_ButtonChar_LongPress(void *self, uint64_t point) {
 }
 
 void fake_English26_Clicked(void *self) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     if (orig_English26_Clicked) {
         // 原逻辑负责在单次 Shift 输入后恢复小写并刷新按键标签；源头 CommitInput
         // 已稳定阻断 OIME，因此不再跳过整条 UI 尾链。
@@ -1243,7 +1378,7 @@ void fake_English26_Clicked(void *self) {
 }
 
 void fake_English26_OnSelectionUpdated(void *self) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     if (orig_English26_OnSelectionUpdated) {
         // 保留布局对光标、Shift 和按键标签的同步；英文联想由 Associate/Candidate
         // 专用 Hook 拦截，不再通过跳过整个布局回调来实现。
@@ -1330,7 +1465,7 @@ void fake_Impl_CommitString(void *self, const void *str, int a, int b, const voi
 }
 
 void fake_OnUpdateEnglishPreCommit(void *self) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip OnUpdateEnglish26PreCommit", ++n);
         clear_english_candidate_state("English26PreCommit");
@@ -1360,7 +1495,7 @@ void force_candidate_idle(const char *reason) {
 }
 
 void clear_english_candidate_state(const char *reason) {
-    if (!is_english_ui()) {
+    if (!should_apply_english_direct()) {
         return;
     }
     static thread_local int reenter = 0;
@@ -1398,7 +1533,7 @@ void clear_english_candidate_state(const char *reason) {
  * 必须在原 JNI 分发读取 IsTyping 前清掉英文镜像，尤其覆盖首次清除后的后续轮次。
  */
 void fake_Jni_DoUpClearAction(void *env, void *object, int action, unsigned char flag) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     int typing_before = -1;
     void *im = InputModel_GetInstance ? InputModel_GetInstance() : nullptr;
     if (im != nullptr && InputModel_IsTyping != nullptr) {
@@ -1441,7 +1576,7 @@ void fake_Jni_DoUpClearAction(void *env, void *object, int action, unsigned char
  * 同步清除。翻译输入框使用同构的 InputBoxTranslateModel::UpClear，也走同一处理。
  */
 void run_input_box_up_clear(void *self, FnVoidSelf original, const char *source) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     int typing_before = -1;
     void *im = InputModel_GetInstance ? InputModel_GetInstance() : nullptr;
     if (im != nullptr && InputModel_IsTyping != nullptr) {
@@ -1491,7 +1626,7 @@ void fake_InputBoxTranslate_UpClear(void *self) {
  * 清掉；放到 OnButtonUp 或 ShowUpClear 都可能已经被第一次手势消费。
  */
 void fake_Backspace_OnButtonDown(void *self, uint64_t point) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     int before = current_keyboard_behavior();
     if (eng) {
         char buf[176];
@@ -1523,7 +1658,7 @@ void fake_Backspace_OnButtonDown(void *self, uint64_t point) {
  * 这里不能 reset keyboard_behavior，该字段仍由当前上滑手势的后续状态机使用。
  */
 void fake_Backspace_ShowUpClear(void *self) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     int before = current_keyboard_behavior();
     static std::atomic<int> count{0};
     int n = ++count;
@@ -1550,7 +1685,7 @@ void fake_Backspace_ShowUpClear(void *self) {
 }
 
 void fake_Backspace_OnButtonUp(void *self, uint64_t point) {
-    bool eng = is_english_ui();
+    bool eng = should_apply_english_direct();
     int before = current_keyboard_behavior();
     if (eng) {
         char buf[160];
@@ -1581,7 +1716,7 @@ void fake_Backspace_OnButtonUp(void *self, uint64_t point) {
 }
 
 void fake_Space_OnButtonUp(void *self, uint64_t point) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         // 先丢弃任何异常残留，再让官方逻辑只提交空格。
         clear_english_engine_state("space-before");
         discard_preedit_once("space-before");
@@ -1594,7 +1729,7 @@ void fake_Space_OnButtonUp(void *self, uint64_t point) {
 
 /** 英文候选条刷新入口：点候选无效是因为提交被拦，这里直接不刷新 UI。 */
 void fake_Cand_UpdateDisplay(void *self, int a, int b, int c) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip Cand UpdateDisplay", ++n);
         return;
@@ -1605,7 +1740,7 @@ void fake_Cand_UpdateDisplay(void *self, int a, int b, int c) {
 }
 
 void fake_Cand_UpdateCandidate(void *self, int a, int b) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip Cand UpdateCandidate", ++n);
         return;
@@ -1616,7 +1751,7 @@ void fake_Cand_UpdateCandidate(void *self, int a, int b) {
 }
 
 void fake_Cand_OnAssociated(void *self, int status, int a, int b) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip Cand OnAssociated", ++n);
         return;
@@ -1627,7 +1762,7 @@ void fake_Cand_OnAssociated(void *self, int status, int a, int b) {
 }
 
 void fake_Cand_UpdateComposition(void *self, int a, int b) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip Cand UpdateComposition", ++n);
         return;
@@ -1638,7 +1773,7 @@ void fake_Cand_UpdateComposition(void *self, int a, int b) {
 }
 
 void fake_CandidateRefresh_Notify(void *self, int event) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip CandidateRefresh Notify", ++n);
         return;
@@ -1649,7 +1784,7 @@ void fake_CandidateRefresh_Notify(void *self, int event) {
 }
 
 void fake_CandidateRefresh_NotifyCommit(void *self) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip CandidateRefresh NotifyCommit", ++n);
         return;
@@ -1662,7 +1797,7 @@ void fake_CandidateRefresh_NotifyCommit(void *self) {
 void fake_CandidateContainer_Snapshot(void *self, const void *corrections,
                                       const void *candidates, int a, int b, int c, int d, int e,
                                       int f, int g) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("block ENG Android candidate snapshot", ++n);
         return;
@@ -1673,7 +1808,7 @@ void fake_CandidateContainer_Snapshot(void *self, const void *corrections,
 }
 
 void fake_CandidateComposition_Update(void *self, int a, int b) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         log_rate("skip CandidateComposition UpdateComp", ++n);
         return;
@@ -1773,8 +1908,8 @@ void fake_Board_FinishPreedit(void *self, int commit, int flag2) {
         }
         return;
     }
-    // 英文：禁止 commit=true 把残留 composing 冲进编辑器；不主动 ClearInput
-    if (is_english_ui() && commit) {
+    // 英文直输：禁止 commit=true 把残留 composing 冲进编辑器；翻译面板需放行。
+    if (should_swallow_english_preedit() && commit) {
         static std::atomic<int> n{0};
         char buf[96];
         snprintf(buf, sizeof(buf), "FinishPreedit eng discard-commit #%d", ++n);
@@ -1793,8 +1928,25 @@ void fake_Board_FinishPreedit(void *self, int commit, int flag2) {
 }
 
 /** 英文禁止非空预编辑上屏（根治 sticky 缓冲下划线）；空串仍放行以清 UI。 */
+
+void fake_Translate_DelayRefreshResponse(void *self) {
+    ++g_in_translate_refresh;
+    static std::atomic<int> n{0};
+    int c = ++n;
+    if (c <= 40 || (c % 10) == 0) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "Translate DelayRefreshResponse #%d depth=%d", c,
+                 g_in_translate_refresh);
+        log_both(buf);
+    }
+    if (orig_Translate_DelayRefreshResponse) {
+        orig_Translate_DelayRefreshResponse(self);
+    }
+    --g_in_translate_refresh;
+}
+
 void fake_Board_UpdatePreedit(void *self, const void *str) {
-    if (is_english_ui()) {
+    if (should_swallow_english_preedit()) {
         StdStrView v = parse_std_string(str);
         if (v.len == 0) {
             if (orig_Board_UpdatePreedit) {
@@ -1820,10 +1972,10 @@ void fake_Board_UpdatePreedit(void *self, const void *str) {
 
 /**
  * 英文词态泄漏出口：正常直提不应到这里；一旦命中就吞掉并清理残留状态。
- * 字母上屏只走 ButtonChar 直提或 InputModel keycode 兜底。
+ * 字母上屏只走 ButtonChar 直提或 InputModel keycode 兜底。翻译刷新必须放行。
  */
 void fake_Callback_UpdatePreedit(void *self, const void *str) {
-    if (!is_english_ui()) {
+    if (!should_swallow_english_preedit()) {
         if (orig_Callback_UpdatePreedit) {
             orig_Callback_UpdatePreedit(self, str);
         }
@@ -1908,7 +2060,7 @@ void fake_Board_CommitString(void *self, const void *str) {
 
 /** 上滑符号主路径：内部会 GetCompOrg 拼「词态+符号」。英文只提交符号本身。 */
 void fake_Board_CommitAppendSymbol(void *self, const void *symbol, int flag) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         StdStrView v = parse_std_string(symbol);
         char buf[160];
@@ -1921,6 +2073,9 @@ void fake_Board_CommitAppendSymbol(void *self, const void *symbol, int flag) {
             g_allow_direct_commit.fetch_sub(1);
         }
         mark_skip_associate();
+        clear_english_engine_state("CommitAppendSymbol");
+        discard_preedit_once("CommitAppendSymbol");
+        clear_english_candidate_state("CommitAppendSymbol");
         return;
     }
     if (orig_Board_CommitAppendSymbol) {
@@ -1929,7 +2084,7 @@ void fake_Board_CommitAppendSymbol(void *self, const void *symbol, int flag) {
 }
 
 void fake_Board_CommitSymbol(void *self, const void *symbol, int flag) {
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         static std::atomic<int> n{0};
         StdStrView v = parse_std_string(symbol);
         char buf[128];
@@ -1943,6 +2098,9 @@ void fake_Board_CommitSymbol(void *self, const void *symbol, int flag) {
             g_allow_direct_commit.fetch_sub(1);
         }
         mark_skip_associate();
+        clear_english_engine_state("CommitSymbol");
+        discard_preedit_once("CommitSymbol");
+        clear_english_candidate_state("CommitSymbol");
         return;
     }
     if (orig_Board_CommitSymbol) {
@@ -2061,7 +2219,7 @@ void fake_SwitchBoard_OnButtonUp(void *self, uint64_t point) {
     snprintf(buf, sizeof(buf), "DIAG SwitchBoard OnButtonUp BEFORE board=%d mode=%d",
              current_board_type(), current_input_mode());
     log_both(buf);
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         clear_english_engine_state("SwitchBoard-before");
         discard_preedit_once("SwitchBoard-before");
     }
@@ -2071,7 +2229,7 @@ void fake_SwitchBoard_OnButtonUp(void *self, uint64_t point) {
     snprintf(buf, sizeof(buf), "DIAG SwitchBoard OnButtonUp AFTER board=%d mode=%d",
              current_board_type(), current_input_mode());
     log_both(buf);
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         force_no_keep_composition("SwitchBoard");
         discard_preedit_once("SwitchBoard");
         clear_english_candidate_state("SwitchBoard");
@@ -2084,7 +2242,7 @@ void fake_SwitchCnEn_OnButtonUp(void *self, uint64_t point) {
              "DIAG SwitchCnEn OnButtonUp BEFORE mode=%d boardType=%d behavior=%d",
              current_input_mode(), current_board_type(), current_keyboard_behavior());
     log_both(buf);
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         clear_english_engine_state("SwitchCnEn-before");
         discard_preedit_once("SwitchCnEn-before");
         clear_english_candidate_state("SwitchCnEn-before");
@@ -2096,7 +2254,7 @@ void fake_SwitchCnEn_OnButtonUp(void *self, uint64_t point) {
              "DIAG SwitchCnEn OnButtonUp AFTER mode=%d boardType=%d behavior=%d",
              current_input_mode(), current_board_type(), current_keyboard_behavior());
     log_both(buf);
-    if (is_english_ui()) {
+    if (should_apply_english_direct()) {
         force_no_keep_composition("SwitchCnEn");
         // 进入英文后清掉旧中文拼音；离开英文时已在调用原切换逻辑前清完英文词态。
         // 切回中文后不得再 FinishPreedit/MarkSkip，否则会吞掉中文联想。
@@ -2132,6 +2290,14 @@ extern "C" int noensuggest_install_hooks(void) {
     }
 
     log_both("noensuggest_install_hooks begin (ELF dynsym v30 shadowhook-unique)");
+    g_hook_total_count = 0;
+    g_hook_ok_count = 0;
+    g_hook_fail_count = 0;
+    g_hook_skip_count = 0;
+    g_hook_fail_names[0] = '\0';
+    g_hook_skip_names[0] = '\0';
+    g_hook_status_map[0] = '\0';
+
 
     /**
      * 本模块每个 native 地址只安装一个代理，并在代理内通过 orig_* trampoline
@@ -2161,17 +2327,33 @@ extern "C" int noensuggest_install_hooks(void) {
 
     bool ok = true;
     auto do_hook = [&](const char *name, void *target, void *proxy, void **orig, bool required) {
+        g_hook_total_count++;
         if (target == nullptr) {
-            char buf[128];
+            char buf[160];
             snprintf(buf, sizeof(buf), "%s %s (null target)", required ? "hook FAIL" : "hook SKIP",
                      name);
             log_both(buf);
             if (required) {
                 ok = false;
+                g_hook_fail_count++;
+                append_hook_named_list(g_hook_fail_names, sizeof(g_hook_fail_names), name);
+                append_hook_status(name, "fail");
+            } else {
+                g_hook_skip_count++;
+                append_hook_named_list(g_hook_skip_names, sizeof(g_hook_skip_names), name);
+                append_hook_status(name, "skip");
             }
             return;
         }
-        if (!hook_addr(name, target, proxy, orig) && required) {
+        if (hook_addr(name, target, proxy, orig)) {
+            g_hook_ok_count++;
+            append_hook_status(name, "ok");
+            return;
+        }
+        g_hook_fail_count++;
+        append_hook_named_list(g_hook_fail_names, sizeof(g_hook_fail_names), name);
+        append_hook_status(name, "fail");
+        if (required) {
             ok = false;
         }
     };
@@ -2226,6 +2408,9 @@ extern "C" int noensuggest_install_hooks(void) {
     do_hook("InputBoxTranslateModel::UpClear", sym_InputBoxTranslate_UpClear,
             reinterpret_cast<void *>(fake_InputBoxTranslate_UpClear),
             reinterpret_cast<void **>(&orig_InputBoxTranslate_UpClear), false);
+    do_hook("TranslateModel::DelayRefreshResponse", sym_Translate_DelayRefreshResponse,
+            reinterpret_cast<void *>(fake_Translate_DelayRefreshResponse),
+            reinterpret_cast<void **>(&orig_Translate_DelayRefreshResponse), false);
     do_hook("ButtonBackspace::OnButtonDown", sym_Backspace_OnButtonDown,
             reinterpret_cast<void *>(fake_Backspace_OnButtonDown),
             reinterpret_cast<void **>(&orig_Backspace_OnButtonDown), false);
@@ -2337,7 +2522,14 @@ extern "C" int noensuggest_install_hooks(void) {
     if (ok && orig_OnButtonUp != nullptr && orig_Board_CommitString != nullptr &&
         orig_Board_CommitAppendSymbol != nullptr) {
         g_ready.store(true);
-        log_both("noensuggest_install_hooks SUCCESS (all required gates active)");
+        {
+            char sbuf[192];
+            snprintf(sbuf, sizeof(sbuf),
+                     "noensuggest_install_hooks SUCCESS ok=%d total=%d fail=%d skip=%d behavior=0x%zx",
+                     g_hook_ok_count, g_hook_total_count, g_hook_fail_count, g_hook_skip_count,
+                     g_behavior_off);
+            log_both(sbuf);
+        }
         g_installing.store(false);
         return 0;
     }
@@ -2402,6 +2594,20 @@ extern "C" int noensuggest_is_english_ui(void) {
     return is_english_ui() ? 1 : 0;
 }
 
+extern "C" int noensuggest_is_translate_active(void) {
+    if (!g_ready.load()) {
+        return 0;
+    }
+    return is_translate_panel_active() ? 1 : 0;
+}
+
+extern "C" int noensuggest_should_apply_english_direct(void) {
+    if (!g_ready.load()) {
+        return 0;
+    }
+    return should_apply_english_direct() ? 1 : 0;
+}
+
 extern "C" int noensuggest_get_board_type(void) {
     if (!g_ready.load()) {
         return -1;
@@ -2415,3 +2621,34 @@ extern "C" int noensuggest_get_input_mode(void) {
     }
     return current_input_mode();
 }
+
+extern "C" int noensuggest_hook_ok_count(void) {
+    return g_hook_ok_count;
+}
+
+extern "C" int noensuggest_hook_total_count(void) {
+    return g_hook_total_count;
+}
+
+extern "C" int noensuggest_hook_fail_count(void) {
+    return g_hook_fail_count;
+}
+
+extern "C" const char *noensuggest_hook_fail_names(void) {
+    return g_hook_fail_names;
+}
+
+extern "C" const char *noensuggest_hook_skip_names(void) {
+    return g_hook_skip_names;
+}
+
+extern "C" const char *noensuggest_hook_status_map(void) {
+    return g_hook_status_map;
+}
+
+
+extern "C" size_t noensuggest_behavior_offset(void) {
+    return g_behavior_off;
+}
+
+

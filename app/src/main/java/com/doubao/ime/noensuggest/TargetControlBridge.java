@@ -7,6 +7,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -90,8 +92,48 @@ final class TargetControlBridge {
                 .putExtra(ModuleStatusProtocol.EXTRA_REPORTED_AT, System.currentTimeMillis())
                 .putExtra(ModuleStatusProtocol.EXTRA_LOG_PATH, FileLogger.currentPath())
                 .putExtra(ModuleStatusProtocol.EXTRA_LOG_ENABLED, FileLogger.isEnabled())
-                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_BUILD, "v27 / 0.7.5");
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_BUILD, loadedModuleVersion())
+                .putExtra(ModuleStatusProtocol.EXTRA_RUNTIME_DETAIL, buildRuntimeDetail(context))
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_OK, NativeBridge.getHookOkCountQuiet())
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_TOTAL, NativeBridge.getHookTotalCountQuiet())
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_FAIL, NativeBridge.getHookFailCountQuiet())
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_FAIL_NAMES,
+                        NativeBridge.getHookFailNamesQuiet())
+                .putExtra(ModuleStatusProtocol.EXTRA_BEHAVIOR_OFFSET,
+                        NativeBridge.getBehaviorOffsetQuiet())
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_SKIP_NAMES,
+                        NativeBridge.getHookSkipNamesQuiet())
+                .putExtra(ModuleStatusProtocol.EXTRA_HOOK_STATUS_MAP,
+                        NativeBridge.getHookStatusMapQuiet());
         context.sendBroadcast(report);
+    }
+
+    /** 注入进程内已加载的模块类版本（与磁盘安装版本可能不一致）。 */
+    private static String loadedModuleVersion() {
+        return BuildConfig.VERSION_NAME + "（" + BuildConfig.VERSION_CODE + "）";
+    }
+
+    private static String installedModuleVersion(Context context) {
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(
+                    ModuleStatusProtocol.MODULE_PACKAGE, 0);
+            long code = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? info.getLongVersionCode() : info.versionCode;
+            String name = info.versionName == null ? "?" : info.versionName;
+            return name + "（" + code + "）";
+        } catch (PackageManager.NameNotFoundException e) {
+            return "未知";
+        }
+    }
+
+    /** 仅在磁盘版本与进程内已加载版本不一致时返回提示。 */
+    private static String buildRuntimeDetail(Context context) {
+        String installed = installedModuleVersion(context);
+        String loaded = loadedModuleVersion();
+        if (installed.equals(loaded)) {
+            return "";
+        }
+        return "⚠ 磁盘已装 " + installed + "，与进程内不一致，请重启豆包输入法";
     }
 
     private static void sendLogs(long offset, int requestId, boolean cleared) {

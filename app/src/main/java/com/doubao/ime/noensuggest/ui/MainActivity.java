@@ -21,8 +21,10 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.util.Linkify;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
@@ -40,6 +42,9 @@ import com.doubao.ime.noensuggest.ModuleStatusReceiver;
 import com.doubao.ime.noensuggest.ModuleApplication;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -62,7 +67,22 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
     private TextView frameworkStatusDetail;
     private TextView targetStatusText;
     private TextView targetStatusDetail;
-    private TextView hookRuntime;
+    private TextView hookVersionNote;
+    private TextView hookMismatchNote;
+    private TextView hookWarning;
+    private FlowLayout hookTagFlow;
+    private LinearLayout hookSectionsHost;
+    private final List<View> hookSectionBodies = new ArrayList<>();
+    private final List<TextView> hookSectionHeaders = new ArrayList<>();
+    private final List<FlowLayout> hookSectionStatusHosts = new ArrayList<>();
+    private int expandedHookSection = -1;
+    private TextView tagJava;
+    private TextView tagNative;
+    private TextView tagInstall;
+    private TextView tagSkip;
+    private TextView tagFail;
+    private Map<String, String> lastHookStatus = new HashMap<>();
+    private long lastBehaviorOff;
     private TextView targetVersion;
     private TextView aboutVersion;
     private TextView logPath;
@@ -260,11 +280,25 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
 
         LinearLayout hookCard = card();
         hookCard.addView(sectionTitle("Hook 修改位置与作用"));
-        hookRuntime = text("等待运行状态…", 13f, colorSecondary, Typeface.BOLD);
-        hookCard.addView(hookRuntime, topMargin(10));
-        TextView hookList = text(hookDescription(), 13f, colorPrimary, Typeface.NORMAL);
-        hookList.setLineSpacing(dp(2), 1.16f);
-        hookCard.addView(hookList, topMargin(12));
+        hookVersionNote = text("模块版本：等待目标进程回报", 12f, colorSecondary, Typeface.NORMAL);
+        hookCard.addView(hookVersionNote, topMargin(6));
+        hookMismatchNote = text("", 12f, colorDanger, Typeface.NORMAL);
+        hookMismatchNote.setVisibility(View.GONE);
+        hookMismatchNote.setLineSpacing(dp(2), 1.15f);
+        hookCard.addView(hookMismatchNote, topMargin(4));
+        hookTagFlow = new FlowLayout(this);
+        buildHookTags(hookTagFlow);
+        hookCard.addView(hookTagFlow, topMargin(10));
+        hookWarning = text("", 12f, colorDanger, Typeface.NORMAL);
+        hookWarning.setVisibility(View.GONE);
+        hookWarning.setLineSpacing(dp(2), 1.15f);
+        hookCard.addView(hookWarning, topMargin(8));
+        // Accordion: tap a numbered item to expand. Colored title dots summarize status.
+        // Intentionally not shown as on-screen tip text.
+        hookSectionsHost = new LinearLayout(this);
+        hookSectionsHost.setOrientation(LinearLayout.VERTICAL);
+        buildHookSections(hookSectionsHost);
+        hookCard.addView(hookSectionsHost, topMargin(10));
         content.addView(hookCard, cardMargin());
         content.addView(space(16));
 
@@ -363,8 +397,9 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         introCard.addView(sectionTitle("模块介绍"));
         TextView introduction = text(
                 "本模块面向官方豆包输入法，通过 LSPosed 在英文键盘下实现单字符直接上屏，"
-                        + "同时阻断英文预编辑、候选词、联想词和切换语言时的重复提交。\n\n"
-                        + "中文拼音、中文候选与中文联想保持输入法原有行为。",
+                        + "并阻断普通输入场景中的英文预编辑、候选词、联想词与切换语言时的重复提交。\n\n"
+                        + "翻译面板英文框仍支持直输与手势大写/符号，同时避免刷新路径死锁与"
+                        + "隐式词态残留。中文拼音、中文候选与中文联想保持输入法原有行为。",
                 14f, colorPrimary, Typeface.NORMAL);
         introduction.setLineSpacing(dp(2), 1.2f);
         introCard.addView(introduction, topMargin(10));
@@ -377,6 +412,9 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         infoCard.addView(aboutVersion, topMargin(8));
         infoCard.addView(infoRow("目标包名",
                 ModuleStatusProtocol.TARGET_PACKAGE), topMargin(8));
+        TextView repoRow = linkRow("仓库",
+                "https://github.com/orz12/no-eng-suggest-doubaoime");
+        infoCard.addView(repoRow, topMargin(8));
         content.addView(infoCard, cardMargin());
 
         LinearLayout noticeCard = card();
@@ -612,8 +650,7 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
             detail += "\n上次回应：" + formatTime(lastSeen);
         }
         setTargetStatus("未回应", colorDanger, detail);
-        hookRuntime.setText("当前未获得豆包输入法进程的实时 Hook 状态");
-        hookRuntime.setTextColor(colorSecondary);
+        renderHookPanel(false, false, null, null, 0, 0, 0, null, null, null, 0L);
     }
 
     private void renderLiveStatus(Intent intent) {
@@ -627,28 +664,22 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         long at = intent.getLongExtra(
                 ModuleStatusProtocol.EXTRA_REPORTED_AT, System.currentTimeMillis());
         String build = intent.getStringExtra(ModuleStatusProtocol.EXTRA_HOOK_BUILD);
+        String detail = intent.getStringExtra(ModuleStatusProtocol.EXTRA_RUNTIME_DETAIL);
+        int hookOk = intent.getIntExtra(ModuleStatusProtocol.EXTRA_HOOK_OK, 0);
+        int hookTotal = intent.getIntExtra(ModuleStatusProtocol.EXTRA_HOOK_TOTAL, 0);
+        int hookFail = intent.getIntExtra(ModuleStatusProtocol.EXTRA_HOOK_FAIL, 0);
+        String failNames = intent.getStringExtra(ModuleStatusProtocol.EXTRA_HOOK_FAIL_NAMES);
+        String skipNames = intent.getStringExtra(ModuleStatusProtocol.EXTRA_HOOK_SKIP_NAMES);
+        String statusMap = intent.getStringExtra(ModuleStatusProtocol.EXTRA_HOOK_STATUS_MAP);
+        long behaviorOff = intent.getLongExtra(ModuleStatusProtocol.EXTRA_BEHAVIOR_OFFSET, 0L);
         setTargetStatus("已回应", colorAccent,
                 "PID " + pid + "\n" + formatTime(at));
-        renderHookRuntime(javaReady, nativeReady, pid, build);
+        renderHookPanel(javaReady, nativeReady, build, detail,
+                hookOk, hookTotal, hookFail, failNames, skipNames, statusMap, behaviorOff);
         String path = intent.getStringExtra(ModuleStatusProtocol.EXTRA_LOG_PATH);
         if (path != null && !path.isEmpty()) {
             logPath.setText("路径：" + path);
         }
-    }
-
-    private void renderHookRuntime(boolean javaReady, boolean nativeReady, int pid, String build) {
-        StringBuilder value = new StringBuilder();
-        value.append(javaReady ? "● Java Hook 已加载" : "○ Java Hook 等待加载");
-        value.append("\n");
-        value.append(nativeReady ? "● Native Hook 已就绪" : "○ Native Hook 等待就绪");
-        if (pid > 0) {
-            value.append("\n进程 PID：").append(pid);
-        }
-        if (build != null && !build.isEmpty()) {
-            value.append("　Hook 构建：").append(build);
-        }
-        hookRuntime.setText(value);
-        hookRuntime.setTextColor(javaReady && nativeReady ? colorAccent : colorDanger);
     }
 
     private void setTargetStatus(String value, int color, String detail) {
@@ -808,6 +839,16 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         return row;
     }
 
+    private TextView linkRow(String label, String url) {
+        TextView row = text(label + "\n" + url, 14f, colorPrimary, Typeface.NORMAL);
+        row.setLineSpacing(dp(2), 1.12f);
+        row.setAutoLinkMask(Linkify.WEB_URLS);
+        row.setText(label + "\n" + url);
+        row.setLinksClickable(true);
+        row.setLinkTextColor(colorAccent);
+        return row;
+    }
+
     private TextView text(String value, float size, int color, int style) {
         TextView view = new TextView(this);
         view.setText(value);
@@ -869,209 +910,676 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private String hookDescription() {
-        return "以下修改只在检测到豆包输入法处于英文键盘或英文输入模式时生效。"
-                + "中文键盘、中文拼音预编辑、中文候选和中文联想均继续调用输入法原始逻辑。\n\n"
+    private void buildHookTags(FlowLayout flow) {
+        flow.removeAllViews();
+        tagJava = createHookTag("Java …", colorSecondary);
+        tagNative = createHookTag("Native …", colorSecondary);
+        tagInstall = createHookTag("ShadowHook …", colorSecondary);
+        tagSkip = createHookTag("未识别 …", colorSecondary);
+        tagFail = createHookTag("失败 …", colorDanger);
+        tagSkip.setVisibility(View.GONE);
+        tagFail.setVisibility(View.GONE);
+        tagInstall.setOnClickListener(v -> expandOverview());
+        tagSkip.setOnClickListener(v -> expandOverview());
+        tagFail.setOnClickListener(v -> expandOverview());
+        flow.addView(tagJava);
+        flow.addView(tagNative);
+        flow.addView(tagInstall);
+        flow.addView(tagSkip);
+        flow.addView(tagFail);
+    }
 
-                + "1. 英文状态识别与行为状态读取\n"
-                + "涉及位置：InputModel::GetInputMode、WindowBoardView::GetBoardType、"
-                + "WindowBoardView::GetKeyboardBehavior。\n"
-                + "原始功能：这些方法分别提供输入引擎当前语言模式、正在显示的键盘板型，"
-                + "以及按键应当采用直接输入还是进入组合输入流程的行为状态。\n"
-                + "调整逻辑：模块同时检查 inputMode 和 boardType，而不是只依赖某一个 Java 布尔值，"
-                + "避免中英切换过程中状态更新顺序不同造成误判。keyboard_behavior 的字段偏移"
-                + "从当前版本函数指令中动态解析；后续所有拦截均以此英文状态为入口条件，"
-                + "不是英文状态时立即执行原方法。\n\n"
+    private void expandOverview() {
+        expandHookSection(hookSectionBodies.size() - 1);
+    }
 
-                + "2. 普通英文字母按键的直接上屏\n"
-                + "涉及位置：ButtonEnglishChar::OnButtonUp、ButtonChar::OnButtonUp、"
-                + "English26Layout::OnButtonEnglishCharClicked。\n"
-                + "原始功能：按下阶段的 CommitInput 会把字符送入英文组词模型；抬起阶段的"
-                + " OnButtonUp 负责按键气泡收尾、长按选择结果以及单次 Shift 输入后的自动回落。"
-                + "布局点击回调同步更新大小写状态和按键标签。\n"
-                + "调整逻辑：模块在 ButtonChar::CommitInput 源头阻止字符进入 OIME 组词缓冲。"
-                + "普通文本框在源头被消费后原始 OnButtonUp 不会自行上屏，因此 behavior=1"
-                + "按键先从按键对象取得当前单字符并通过受控 CommitString 提交，随后仍继续"
-                + "执行原始 OnButtonUp 和布局点击尾链，以同时保留直输、气泡收尾和单次 Shift 回落。"
-                + "密码框例外：原 OnButtonUp 会先调用当前输入框的 IsPasswordBox，为真且"
-                + "behavior=1 时自己 CommitString。此时模块不再预提交，只走原尾链，避免重复上屏。"
-                + "长按 behavior=5 不提前提交，完整交给原始 Move/Up 滑选链；多字符英文整词提交仍被拦截。"
-                + "底层 keycode 直提只作为版本差异兜底，并使用短时间标记避免重复提交。\n\n"
+    private TextView createHookTag(String label, int color) {
+        TextView tag = text(label, 12f, color, Typeface.BOLD);
+        tag.setPadding(dp(10), dp(6), dp(10), dp(6));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(colorInner);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), colorBorder);
+        tag.setBackground(bg);
+        return tag;
+    }
 
-                + "3. 阻断字符进入英文组词缓冲区\n"
-                + "涉及位置：ButtonChar::CommitInput、BoardController::CommitKeycode、"
-                + "BoardController::PushCommitKeycode、InputModel::CommitKeycode、"
-                + "InputModel::PushCommitKeycode、InputModel::Impl::Input、"
-                + "InputModel::OnUpdateEnglish26PreCommit。\n"
-                + "原始功能：这些方法位于按键输入到英文引擎之间的不同层级，负责把 keycode、"
-                + "字符及上下文压入模型，累计形成单词，并触发英文 pre-commit、纠错和候选计算。\n"
-                + "调整逻辑：英文模式下不再让普通字母进入累计组词流程。能够可靠转换成单个 ASCII"
-                + "字符的 keycode 直接提交；已经由上层完成提交的调用直接消费；"
-                + "英文预提交更新被停止并随后清理状态。这样即使候选栏已经隐藏，"
-                + "引擎内部也不会继续保存一个看不见的 test 之类的完整单词。\n\n"
+    private TextView createStatusChip(String label, int color) {
+        TextView tag = text(label, 11f, color, Typeface.NORMAL);
+        tag.setPadding(dp(8), dp(4), dp(8), dp(4));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(softColor(color));
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(1), color);
+        tag.setBackground(bg);
+        return tag;
+    }
 
-                + "4. Native 预编辑产生与结束流程\n"
-                + "涉及位置：BoardController::UpdatePreedit、BoardController::FinishPreedit、"
-                + "KeyboardCallbackImpl::UpdatePreedit。\n"
-                + "原始功能：UpdatePreedit 把引擎中的组合文本送往回调层和编辑器，"
-                + "用于显示英文下划线、组合串和光标；FinishPreedit 在空格、切换语言、"
-                + "结束输入等场景决定提交还是丢弃这段组合文本。\n"
-                + "调整逻辑：非空英文预编辑在 Native 层直接吞掉，不允许继续写入编辑器；"
-                + "空字符串仍然放行，因为它用于清除编辑器中已经存在的 composing 状态。"
-                + "若版本特定路径仍抵达 KeyboardCallbackImpl::UpdatePreedit，模块只救援"
-                + "累计串最后一个尚未直提的 ASCII 字符，并在豆包输入法自身的 Native"
-                + " 回调栈内执行 InputModel::Clear；这样既立即复位底层引擎，又避免从模块"
-                + " JNI ClassLoader 调用清理导致崩溃。"
-                + "结束英文预编辑时强制使用 discard 语义，而不是把隐藏缓冲区作为一个单词提交。"
-                + "只有在 startInputView 已完成后才执行需要 InputView 的清理，"
-                + "避免输入法初始化阶段访问尚未建立的对象。\n\n"
+    private void styleHookTag(TextView tag, String label, int color, boolean emphasis) {
+        if (tag == null) {
+            return;
+        }
+        tag.setText(label);
+        tag.setTextColor(color);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(emphasis ? softColor(color) : colorInner);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), emphasis ? color : colorBorder);
+        tag.setBackground(bg);
+    }
 
-                + "5. Java 预编辑末端保护\n"
-                + "涉及位置：KeyboardJni.UpdatePreedit、KeyboardJni.UpdateCompStr、"
-                + "KeyboardJni.finishPreedit。\n"
-                + "原始功能：这些 JNI 方法是 Native 输入引擎到 Android InputConnection"
-                + "之间的最终桥梁，负责更新 composing 文本、组合字符串以及结束预编辑时是否提交。\n"
-                + "调整逻辑：英文非空 UpdatePreedit 和 UpdateCompStr 不再进入 InputConnection；"
-                + "清除预编辑使用的空串继续执行。Java 层不再根据累计文本差值或全局递增序号"
-                + "补交字符，因为异步回调与序号没有一一对应关系，补交会让编辑器正文和 Native"
-                + " 词态分叉，并可能把下一条回调误认为上一条。若 unique-mode Native 源头拦截后"
-                + "仍收到非空英文 preedit，Java 只吞掉并记录异常，不自行制造新的提交。"
-                + "finishPreedit 的 commit 参数在英文状态下改为 discard，"
-                + "防止结束输入时冲出整词。\n\n"
+    private int softColor(int color) {
+        return Color.argb(36, Color.red(color), Color.green(color), Color.blue(color));
+    }
 
-                + "6. 整词提交出口与重复提交去重\n"
-                + "涉及位置：InputModel::Impl::CommitString、BoardController::CommitString、"
-                + "KeyboardCallbackImpl::DoCommit、KeyboardJni.commitString、KeyboardJni.DoCommit。\n"
-                + "原始功能：这些方法把引擎已经形成的字符串最终写入编辑器，"
-                + "正常用于候选选择、空格确认、标点处理以及切换语言时提交剩余组合文本。\n"
-                + "调整逻辑：英文状态下，未经模块明确授权的多字符字母数字提交会被拦截，"
-                + "只有当前按键的单字符直接提交或受控符号提交可以通过。Java 和 Native 两端"
-                + "都会阻止残留词态以多字符字母数字形式整体提交；中文提交和非英文文本仍走原流程。\n\n"
+    private Map<String, String> parseHookStatusMap(String raw) {
+        Map<String, String> map = new HashMap<>();
+        if (raw == null || raw.isEmpty()) {
+            return map;
+        }
+        for (String entry : raw.split(";")) {
+            if (entry == null || entry.isEmpty()) {
+                continue;
+            }
+            int eq = entry.indexOf('=');
+            if (eq <= 0 || eq >= entry.length() - 1) {
+                continue;
+            }
+            map.put(entry.substring(0, eq).trim(), entry.substring(eq + 1).trim());
+        }
+        return map;
+    }
 
-                + "7. 英文候选栏刷新链路\n"
-                + "涉及位置：CandidateToolbarCenter::UpdateCandidateDisplay、"
-                + "UpdateCandidate、OnAssociated、UpdateComposition，"
-                + "CandidateRefreshManager::NotifyRefreshListener、NotifyCommitStringListeners，"
-                + "CandidateContainerCenter::BuildAndPushAndroidSnapshot，"
-                + "CandidateCompositionCenter::UpdateComp。\n"
-                + "原始功能：这些组件从输入模型取得候选、纠错或联想结果，刷新候选工具栏，"
-                + "构建 Android 侧候选快照，并更新候选区中的组合文本。\n"
-                + "调整逻辑：英文状态下从候选生成、刷新通知、组合更新到最终 Android 快照全部停止，"
-                + "并把 CandidateToolbarCenter、CandidateRefreshManager 和 CorrectionManager"
-                + "恢复到空闲或清空状态。这样不仅隐藏现有候选，也阻止云候选、延迟刷新或"
-                + "其它异步结果稍后重新出现。\n\n"
+    private void renderHookPanel(boolean javaReady, boolean nativeReady, String build,
+            String detail, int hookOk, int hookTotal, int hookFail, String failNames,
+            String skipNames, String statusMap, long behaviorOff) {
+        lastHookStatus = parseHookStatusMap(statusMap);
+        lastBehaviorOff = behaviorOff;
+        if (hookVersionNote != null) {
+            hookVersionNote.setText(build == null || build.isEmpty()
+                    ? "模块版本：未知"
+                    : ("模块版本：" + build));
+        }
+        if (hookMismatchNote != null) {
+            if (detail != null && !detail.isEmpty()) {
+                hookMismatchNote.setVisibility(View.VISIBLE);
+                hookMismatchNote.setText(detail);
+            } else {
+                hookMismatchNote.setVisibility(View.GONE);
+                hookMismatchNote.setText("");
+            }
+        }
+        styleHookTag(tagJava, javaReady ? "Java 已加载" : "Java 未加载",
+                javaReady ? colorAccent : colorDanger, javaReady);
+        styleHookTag(tagNative, nativeReady ? "Native 已就绪" : "Native 未就绪",
+                nativeReady ? colorAccent : colorDanger, nativeReady);
+        if (hookTotal > 0) {
+            boolean installOk = hookFail == 0 && nativeReady;
+            styleHookTag(tagInstall, "ShadowHook " + hookOk + "/" + hookTotal,
+                    installOk ? colorAccent : colorDanger, true);
+        } else {
+            styleHookTag(tagInstall, "ShadowHook —", colorSecondary, false);
+        }
+        int skipCount = countCsv(skipNames);
+        if (skipCount > 0) {
+            tagSkip.setVisibility(View.VISIBLE);
+            styleHookTag(tagSkip, "未识别 " + skipCount, Color.parseColor("#C9881C"), true);
+        } else {
+            tagSkip.setVisibility(View.GONE);
+        }
+        if (hookFail > 0) {
+            tagFail.setVisibility(View.VISIBLE);
+            styleHookTag(tagFail, "失败 " + hookFail, colorDanger, true);
+        } else {
+            tagFail.setVisibility(View.GONE);
+        }
 
-                + "8. Java 候选显示最终出口\n"
-                + "涉及位置：KeyboardJni.notifyCandidateBarSnapshot、"
-                + "KeyboardJni.notifyMoreCandidateSnapshot、KeyboardJni.ShouldShowCandidateInfo。\n"
-                + "原始功能：前两个方法把普通候选栏和更多候选面板的快照真正送入 Android UI，"
-                + "ShouldShowCandidateInfo 决定当前是否展示候选信息区域。\n"
-                + "调整逻辑：英文状态下所有同名 snapshot 重载均直接返回，"
-                + "ShouldShowCandidateInfo 固定返回 false。这一层作为 UI 末端兜底，"
-                + "覆盖未经过部分 Native CandidateToolbar 回调的云候选和延迟候选。"
-                + "中文状态下快照和显示判断不变。\n\n"
+        StringBuilder warn = new StringBuilder();
+        if (skipCount > 0 && skipNames != null && !skipNames.isEmpty()) {
+            warn.append("未识别：").append(fullNameList(skipNames));
+            warn.append("（可选符号在当前豆包版本中不存在，未挂钩；不属于失败）");
+        }
+        if (hookFail > 0 && failNames != null && !failNames.isEmpty()) {
+            if (warn.length() > 0) {
+                warn.append('\n');
+            }
+            warn.append("失败：").append(fullNameList(failNames));
+        }
+        if (warn.length() == 0) {
+            hookWarning.setVisibility(View.GONE);
+            hookWarning.setText("");
+        } else {
+            hookWarning.setVisibility(View.VISIBLE);
+            hookWarning.setText(warn);
+        }
+        refreshHookSectionStatuses(javaReady);
+    }
 
-                + "9. 英文联想词和关联词计算\n"
-                + "涉及位置：InputModel::Associate、InputModel::Impl::Associate 的两个重载、"
-                + "InputModel::AssociateSelectText、InputModel::Impl::AssociateSelectText、"
-                + "InputModel::OnAssociate、BoardController::Associate、"
-                + "KeyboardCallbackImpl::NotifyUpdateAssociations。\n"
-                + "原始功能：这些方法根据已输入或已提交文本请求下一词预测，处理选中的关联文本，"
-                + "并通知候选栏刷新联想结果。\n"
-                + "调整逻辑：英文状态下关联请求、选择关联文本、关联完成回调和刷新通知均不再继续，"
-                + "同时设置跳过 association 的状态，避免刚提交一个字母后又以该字母为上下文"
-                + "生成英文单词或短语。中文模式仍保留输入法原有的中文联想。\n\n"
+    private int countCsv(String csv) {
+        if (csv == null || csv.trim().isEmpty()) {
+            return 0;
+        }
+        int n = 0;
+        for (String part : csv.split(",")) {
+            if (!part.trim().isEmpty()) {
+                n++;
+            }
+        }
+        return n;
+    }
 
-                + "10. Java 联想接口\n"
-                + "涉及位置：KeyboardJni.NotifyUpdateAssociations、getAssociations、"
-                + "doAssociations、isAssociate。\n"
-                + "原始功能：这些接口请求关联词数组、返回当前关联状态，"
-                + "并把 Native 关联结果通知到 Java 层。\n"
-                + "调整逻辑：英文状态下关联数组返回空数组、关联状态返回 false、"
-                + "关联刷新通知不执行。模块不再调用或 Hook 全局 setAssociationEnabled，"
-                + "避免英文阶段的关闭值残留到中文；切换到中文后所有联想接口立即走豆包输入法原逻辑。\n\n"
+    private String fullNameList(String names) {
+        String[] parts = names.split(",");
+        StringBuilder out = new StringBuilder();
+        int limit = Math.min(parts.length, 8);
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) {
+                out.append(", ");
+            }
+            out.append(parts[i].trim());
+        }
+        if (parts.length > limit) {
+            out.append(" 等");
+        }
+        return out.toString();
+    }
 
-                + "11. 光标、选区、纠错和预编辑状态同步\n"
-                + "涉及位置：English26Layout::OnSelectionUpdated、"
-                + "KeyboardJni.onSelectionUpdated 及 SelectionUpdatedParams。\n"
-                + "原始功能：用户移动光标、删除文本或编辑选区时，输入法会同步 selection，"
-                + "并可能根据光标附近文本重新触发纠错、预编辑恢复和关联词计算。\n"
-                + "调整逻辑：选区同步本身仍然执行，保证光标和编辑器状态正常；"
-                + "但英文参数中的 need_association、enable_correct、has_preedit 被关闭，"
-                + "pre_edit_text 被清空，并设置禁用光标变化关联的标记。"
-                + "Native 英文选区回调也保留原始执行，以维持布局、光标和 Shift 状态；"
-                + "它产生的英文关联和候选刷新由各自的专用 Hook 拦截，不再跳过整个 UI 回调。\n\n"
 
-                + "12. 空格键与退格键\n"
-                + "涉及位置：ButtonSpace::OnButtonUp、ButtonBackspace::OnButtonDown、"
-                + "ButtonBackspace::ShowUpClear、"
-                + "ButtonBackspace::OnButtonUp、KeyboardJni.ClearText、"
-                + "KeyboardJni.ClearTextBeforeCursor、InputBoxScreenModel::UpClear、"
-                + "InputBoxTranslateModel::UpClear、Jni_DoUpClearAction。\n"
-                + "原始功能：英文组词状态下，空格通常先确认当前单词再输入空格；"
-                + "普通退格通常优先删除预编辑缓冲区中的字符，而上滑退格会先判断是否仍有组合文本，"
-                + "组合文本为空时才继续清除编辑器正文。\n"
-                + "调整逻辑：英文模式下先清空隐藏引擎缓冲区、丢弃预编辑并清除候选，"
-                + "再调用按键原方法。因此空格不会先冲出一个隐藏单词，退格也不会只删除"
-                + "不可见的 preedit，而是按编辑器中的实际已上屏内容工作。上滑清除在"
-                + "OnButtonDown 手势起点和 ShowUpClear 手势确认点分两层提前丢弃不可见的英文镜像，"
-                + "并在输入框 UpClear 最终入口检查 IsTyping 前再次同步清除；"
-                + "Jni_DoUpClearAction 入口同时作为其他版本可能存在的分发路径保护。"
-                + "此外在 BoardController::CommitKeycode 和 PushCommitKeycode 增加稳定的源头闸门，"
-                + "弥补部分版本通过虚表或尾调用绕过 ButtonChar、InputModel 符号入口的情况。"
-                + "ClearText 完成后同步清除 Java 侧的异常预编辑诊断状态。"
-                + "调用完成后再次标记跳过联想并恢复正常键盘行为。\n\n"
+    private void buildHookSections(LinearLayout host) {
+        hookSectionBodies.clear();
+        hookSectionHeaders.clear();
+        hookSectionStatusHosts.clear();
+        expandedHookSection = -1;
+        host.removeAllViews();
+        HookSection[] sections = hookSections();
+        for (int i = 0; i < sections.length; i++) {
+            host.addView(createHookSection(i, sections[i], false),
+                    i == 0 ? topMargin(0) : topMargin(8));
+        }
+        host.addView(createHookSection(sections.length, overviewSection(), true),
+                topMargin(14));
+    }
 
-                + "13. 长按、上滑字符和符号提交\n"
-                + "涉及位置：ButtonEnglishPushCommit::OnButtonUp、"
-                + "ButtonChar::OnButtonLongPress、BoardController::CommitAppendSymbol、"
-                + "BoardController::CommitSymbol。\n"
-                + "原始功能：这些入口负责按键上滑字符、长按备选字符，以及标点符号的追加或直接提交；"
-                + "部分路径会把符号附加到正在组合的英文单词后再整体提交。\n"
-                + "调整逻辑：长按原函数设置的 keyboard_behavior=5 会一直保留到 Move/Up"
-                + " 完成气泡滑选，模块不在 LongPress 回调后提前重置行为状态、隐藏气泡或清候选。"
-                + "最终保留用户实际选择的长按字符和符号输入，但不允许它们携带隐藏英文组合串。"
-                + "符号通过临时授权的单次提交路径输出，提交前后清理英文词态、候选和联想，"
-                + "避免输入标点时把之前看不见的字母一起上屏。\n\n"
+    private View createHookSection(int index, HookSection section, boolean overview) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(overview ? 12 : 10), dp(12), dp(overview ? 12 : 10));
+        GradientDrawable bg = new GradientDrawable();
+        if (overview) {
+            bg.setColor(colorCard);
+            bg.setCornerRadius(dp(10));
+            bg.setStroke(dp(2), colorAccent);
+        } else {
+            bg.setColor(colorInner);
+            bg.setCornerRadius(dp(12));
+            bg.setStroke(dp(1), colorBorder);
+        }
+        box.setBackground(bg);
 
-                + "14. 中英文模式、键盘板型和保留组合状态\n"
-                + "涉及位置：InputModel::SetInputMode、"
-                + "WindowBoardView::SetBoardType(InputMode)、"
-                + "WindowBoardView::SetBoardType(InputBoardType)、"
-                + "ButtonSwitchChineseEnglish::OnButtonUp、ButtonSwitchBoard::OnButtonUp、"
-                + "InputModel::SetKeepCompositionOnEnglishSwitch。\n"
-                + "原始功能：这些方法负责切换中英文输入模式和键盘布局，并可在切换时保留、"
-                + "迁移或提交当前 composition，以便输入法延续未完成的单词或拼音。\n"
-                + "调整逻辑：离开英文模式或切换板型前，先清除英文引擎缓冲和预编辑，"
-                + "防止原方法在切换过程中提交隐藏整词；只有切换结果仍为英文时才继续清理英文候选。"
-                + "KeepComposition 也只在当前英文状态下强制为 false。切回中文后不再执行"
-                + " FinishPreedit、MarkSkip 或候选清理，避免吞掉第一条中文联想。\n\n"
+        TextView header = overview
+                ? text(section.title, 12f, colorAccent, Typeface.BOLD)
+                : text("● " + section.title, 13f, colorSecondary, Typeface.BOLD);
+        header.setLineSpacing(0f, 1.15f);
 
-                + "15. 输入视图生命周期与安全清理时机\n"
-                + "涉及位置：KeyboardJni.startInputView、onFinishInputView、"
-                + "onFinishInput、finishInputView。\n"
-                + "原始功能：这些回调建立或释放当前 EditorInfo、InputConnection 和输入视图，"
-                + "输入法也会在其中初始化候选、关联和预编辑状态。\n"
-                + "调整逻辑：startInputView 成功后才把 Native 清理标记为可用，"
-                + "结束输入或关闭输入视图时撤销该标记，"
-                + "避免初始化早期或销毁后调用 FinishPreedit 导致空对象异常。"
-                + "模块不会伪造密码框状态，也不绕过输入法原有的真实密码输入判断。\n\n"
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setVisibility(overview ? View.VISIBLE : View.GONE);
+        if (section.blurb != null && !section.blurb.isEmpty()) {
+            TextView blurb = text(section.blurb, 12f, colorSecondary, Typeface.NORMAL);
+            blurb.setLineSpacing(dp(2), 1.18f);
+            body.addView(blurb);
+        }
+        FlowLayout statusHost = new FlowLayout(this);
+        body.addView(statusHost, topMargin(6));
 
-                + "16. 版本兼容、符号解析和安装完整性\n"
-                + "涉及位置：libkeyboard.so 的 ELF .dynsym 解析、ShadowHook 安装、"
-                + "keyboard_behavior 偏移动态发现。\n"
-                + "原始功能：这些属于模块注入层，用于定位豆包输入法 Native C++ 方法，"
-                + "并不替代输入法自身业务逻辑。\n"
-                + "调整逻辑：模块从当前进程 maps 获取实际 libkeyboard 基址，"
-                + "再解析当前 APK 中 SO 的动态符号，而不是依赖固定函数地址；"
-                + "当前单字符字段和 keyboard_behavior 字段通过目标函数指令动态推导，"
-                + "并保留已知版本回退值。"
-                + "ShadowHook 固定使用 unique 模式：本模块对每个地址只安装一个代理，"
-                + "代理通过 orig trampoline 调用原方法。早期 shared 模式实现没有在代理返回前"
-                + "弹出 ShadowHook 内部调用栈，导致同一 Hook 通常只命中一次，后续按键被误判为"
-                + "循环重入而绕过；大小写和长按后的隐藏 composition 均由此产生。"
-                + "直接输入、预编辑、整词提交、候选快照和关联链路中的关键 Hook 必须全部安装成功"
-                + "才报告 Native Hook 已就绪；可选版本差异点缺失时记录状态但不影响中文输入。";
+        if (!overview) {
+            header.setOnClickListener(v -> toggleHookSection(index));
+            box.setOnClickListener(v -> toggleHookSection(index));
+        }
+        box.addView(header);
+        box.addView(body, topMargin(8));
+
+        hookSectionHeaders.add(header);
+        hookSectionBodies.add(body);
+        hookSectionStatusHosts.add(statusHost);
+        return box;
+    }
+
+    private void toggleHookSection(int index) {
+        if (index < 0 || index >= hookSectionBodies.size() - 1) {
+            return;
+        }
+        if (expandedHookSection == index) {
+            collapseHookSection(index);
+            expandedHookSection = -1;
+            return;
+        }
+        if (expandedHookSection >= 0 && expandedHookSection < hookSectionBodies.size() - 1) {
+            collapseHookSection(expandedHookSection);
+        }
+        expandHookSection(index);
+    }
+
+    private void expandHookSection(int index) {
+        if (index < 0 || index >= hookSectionBodies.size()) {
+            return;
+        }
+        if (index == hookSectionBodies.size() - 1) {
+            hookSectionBodies.get(index).setVisibility(View.VISIBLE);
+            return;
+        }
+        if (expandedHookSection >= 0
+                && expandedHookSection != index
+                && expandedHookSection < hookSectionBodies.size() - 1) {
+            collapseHookSection(expandedHookSection);
+        }
+        hookSectionBodies.get(index).setVisibility(View.VISIBLE);
+        expandedHookSection = index;
+    }
+
+    private void collapseHookSection(int index) {
+        if (index < 0 || index >= hookSectionBodies.size() - 1) {
+            return;
+        }
+        hookSectionBodies.get(index).setVisibility(View.GONE);
+    }
+
+    private void refreshHookSectionStatuses(boolean javaReady) {
+        HookSection[] sections = hookSections();
+        for (int i = 0; i < sections.length && i < hookSectionHeaders.size(); i++) {
+            HookSection section = sections[i];
+            int summary = summarizeSection(section, javaReady, false);
+            TextView header = hookSectionHeaders.get(i);
+            header.setText("● " + section.title);
+            header.setTextColor(summaryColor(summary));
+
+            FlowLayout flow = hookSectionStatusHosts.get(i);
+            flow.removeAllViews();
+            // Explicit markers are declared on each section; never invent tags from emptiness.
+            if (section.javaSide) {
+                flow.addView(createStatusChip(
+                        javaReady ? "Java 侧（随模块加载）" : "Java 侧未加载",
+                        javaReady ? colorAccent : colorSecondary));
+            }
+            if (section.behaviorOffset) {
+                if (lastBehaviorOff > 0L) {
+                    flow.addView(createStatusChip(
+                            "behavior偏移量 0x" + Long.toHexString(lastBehaviorOff),
+                            colorAccent));
+                } else {
+                    flow.addView(createStatusChip(
+                            javaReady ? "behavior偏移量 未解析" : "behavior偏移量 —",
+                            javaReady ? colorDanger : colorSecondary));
+                }
+            }
+            for (String hook : section.hooks) {
+                String st = lastHookStatus.containsKey(hook)
+                        ? lastHookStatus.get(hook) : "unknown";
+                flow.addView(createStatusChip(formatHookChip(hook, st), statusColor(st)));
+            }
+        }
+
+        int overviewIndex = hookSectionBodies.size() - 1;
+        if (overviewIndex >= sections.length && overviewIndex < hookSectionHeaders.size()) {
+            int summary = summarizeSection(overviewSection(), javaReady, true);
+            TextView header = hookSectionHeaders.get(overviewIndex);
+            header.setText(overviewSection().title);
+            header.setTextColor(summaryColor(summary));
+            FlowLayout flow = hookSectionStatusHosts.get(overviewIndex);
+            flow.removeAllViews();
+            if (lastHookStatus.isEmpty()) {
+                flow.addView(createStatusChip("等待 ShadowHook 回报", colorSecondary));
+            } else {
+                boolean anyAbnormal = false;
+                for (Map.Entry<String, String> e : lastHookStatus.entrySet()) {
+                    String st = e.getValue();
+                    if ("ok".equals(st)) {
+                        continue;
+                    }
+                    anyAbnormal = true;
+                    flow.addView(createStatusChip(
+                            formatHookChip(e.getKey(), st), statusColor(st)));
+                }
+                if (!anyAbnormal) {
+                    flow.addView(createStatusChip("全部成功", colorAccent));
+                }
+            }
+        }
+    }
+
+    /** ok: name only; abnormal: name + status suffix. */
+    private String formatHookChip(String name, String st) {
+        if ("ok".equals(st)) {
+            return name;
+        }
+        if ("skip".equals(st)) {
+            return name + " · 未识别";
+        }
+        if ("fail".equals(st)) {
+            return name + " · 失败";
+        }
+        return name + " · 未知";
+    }
+
+    /** 0 unknown, 1 ok, 2 skip, 3 fail */
+    private int summarizeSection(HookSection section, boolean javaReady, boolean overview) {
+        if (overview) {
+            boolean hasFail = false;
+            boolean hasSkip = false;
+            boolean hasOk = false;
+            for (String st : lastHookStatus.values()) {
+                if ("fail".equals(st)) {
+                    hasFail = true;
+                } else if ("skip".equals(st)) {
+                    hasSkip = true;
+                } else if ("ok".equals(st)) {
+                    hasOk = true;
+                }
+            }
+            if (hasFail) {
+                return 3;
+            }
+            if (hasSkip) {
+                return 2;
+            }
+            return hasOk ? 1 : 0;
+        }
+        if (section.hooks.length == 0) {
+            if (section.behaviorOffset) {
+                return lastBehaviorOff > 0L ? 1 : 0;
+            }
+            if (section.javaSide) {
+                return javaReady ? 1 : 0;
+            }
+            return 0;
+        }
+        boolean any = false;
+        boolean hasFail = false;
+        boolean hasSkip = false;
+        boolean hasUnknown = false;
+        for (String hook : section.hooks) {
+            String st = lastHookStatus.get(hook);
+            if (st == null) {
+                hasUnknown = true;
+                continue;
+            }
+            any = true;
+            if ("fail".equals(st)) {
+                hasFail = true;
+            } else if ("skip".equals(st)) {
+                hasSkip = true;
+            }
+        }
+        if (hasFail) {
+            return 3;
+        }
+        if (!any || hasUnknown) {
+            return 0;
+        }
+        if (hasSkip) {
+            return 2;
+        }
+        return 1;
+    }
+
+    private int summaryColor(int summary) {
+        if (summary == 1) {
+            return colorAccent;
+        }
+        if (summary == 2) {
+            return Color.parseColor("#C9881C");
+        }
+        if (summary == 3) {
+            return colorDanger;
+        }
+        return colorSecondary;
+    }
+
+    private String statusLabel(String st) {
+        if ("ok".equals(st)) {
+            return "";
+        }
+        if ("skip".equals(st)) {
+            return "未识别";
+        }
+        if ("fail".equals(st)) {
+            return "失败";
+        }
+        return "未知";
+    }
+
+    private int statusColor(String st) {
+        if ("ok".equals(st)) {
+            return colorAccent;
+        }
+        if ("skip".equals(st)) {
+            return Color.parseColor("#C9881C");
+        }
+        if ("fail".equals(st)) {
+            return colorDanger;
+        }
+        return colorSecondary;
+    }
+
+    private static final class HookSection {
+        final String title;
+        final String blurb;
+        /** Explicit Java-side work; shown as its own tag, never inferred from empty hooks. */
+        final boolean javaSide;
+        /** Section reports keyboard_behavior offset discovery. */
+        final boolean behaviorOffset;
+        final String[] hooks;
+
+        HookSection(String title, String blurb, boolean javaSide, boolean behaviorOffset,
+                String... hooks) {
+            this.title = title;
+            this.blurb = blurb;
+            this.javaSide = javaSide;
+            this.behaviorOffset = behaviorOffset;
+            this.hooks = hooks;
+        }
+    }
+
+    private HookSection overviewSection() {
+        return new HookSection(
+                "ShadowHook 总览",
+                "这里只列出异常的 ShadowHook 安装项，便于对照排查。"
+                        + "「未识别」表示可选符号在当前豆包版本中不存在，不属于失败；"
+                        + "「失败」表示挂钩没有成功。若全部正常，则显示「全部成功」。",
+                false, false
+        );
+    }
+
+    private HookSection[] hookSections() {
+        // Hook names must match native do_hook() labels exactly.
+        // javaSide / behaviorOffset are explicit markers for non-native-hook work.
+        return new HookSection[]{
+                new HookSection(
+                        "1. 英文状态与 behavior 偏移",
+                        "读取当前输入模式（inputMode）和键盘板型（boardType），判断是否处于英文输入。"
+                                + "同时解析 keyboard_behavior 字段在键盘对象内存中的字节偏移。"
+                                + "behavior 是键盘内部用来记录「当前按键姿态」的状态值，"
+                                + "例如普通点按、长按弹出气泡、上滑输入等。"
+                                + "模块在英文直接上屏后需要把它复位，因此必须知道这个偏移。"
+                                + "本项包含 Java 侧状态判断，以及 Native 侧偏移解析；"
+                                + "解析失败时，长按或上滑之后的状态复位可能异常。",
+                        true, true
+                ),
+                new HookSection(
+                        "2. 英文字母直接上屏",
+                        "拦截英文字母按键，改为把单个字符直接提交到输入框，而不是先进入组词缓冲。",
+                        false, false,
+                        "ButtonEnglishChar::OnButtonUp", "ButtonChar::OnButtonUp",
+                        "ButtonChar::CommitInput", "English26Layout::OnButtonEnglishCharClicked"
+                ),
+                new HookSection(
+                        "3. 阻断进入英文组词缓冲",
+                        "阻止字母按键进入输入引擎的组词和预提交链路，避免生成隐藏的英文词态。",
+                        false, false,
+                        "BoardController::CommitKeycode", "BoardController::PushCommitKeycode",
+                        "InputModel::CommitKeycode", "InputModel::PushCommitKeycode",
+                        "InputModel::Impl::Input", "InputModel::OnUpdateEnglish26PreCommit"
+                ),
+                new HookSection(
+                        "4. 翻译面板刷新防护",
+                        "在翻译面板刷新路径上绕过 Clear，避免刷新与清理互相等待造成卡死。",
+                        false, false,
+                        "TranslateModel::DelayRefreshResponse"
+                ),
+                new HookSection(
+                        "5. Native 预编辑",
+                        "在非翻译场景下拦截英文 composing（预编辑串）；结束预编辑时改为丢弃，而不是提交。",
+                        false, false,
+                        "BoardController::FinishPreedit", "BoardController::UpdatePreedit",
+                        "KeyboardCallbackImpl::UpdatePreedit"
+                ),
+                new HookSection(
+                        "6. Java 预编辑末端",
+                        "在 Java 侧拦截 UpdatePreedit 与 finishPreedit，作为预编辑链路的最后一道保护。",
+                        true, false
+                ),
+                new HookSection(
+                        "7. 整词与符号提交出口",
+                        "拦截未经授权的多字符整词提交；符号按受控方式单次提交，并在提交后清理残留词态。",
+                        false, false,
+                        "InputModel::Impl::CommitString", "BoardController::CommitString",
+                        "BoardController::CommitAppendSymbol", "BoardController::CommitSymbol",
+                        "KeyboardCallbackImpl::DoCommit"
+                ),
+                new HookSection(
+                        "8. 英文候选栏",
+                        "停止英文候选词的生成、刷新和推送，避免候选栏继续干扰直接上屏。",
+                        false, false,
+                        "CandidateToolbarCenter::UpdateCandidateDisplay",
+                        "CandidateToolbarCenter::UpdateCandidate",
+                        "CandidateToolbarCenter::OnAssociated",
+                        "CandidateToolbarCenter::UpdateComposition",
+                        "CandidateRefreshManager::NotifyRefreshListener",
+                        "CandidateRefreshManager::NotifyCommitStringListeners",
+                        "CandidateContainerCenter::BuildAndPushAndroidSnapshot",
+                        "CandidateCompositionCenter::UpdateComp"
+                ),
+                new HookSection(
+                        "9. Java 候选显示出口",
+                        "拦截候选快照相关的 JNI 出口，阻止英文候选最终显示到界面。",
+                        true, false
+                ),
+                new HookSection(
+                        "10. 英文联想",
+                        "停止英文联想的请求、选择和通知，避免联想结果继续出现。",
+                        false, false,
+                        "InputModel::Associate", "InputModel::Impl::Associate#1",
+                        "InputModel::Impl::Associate#2", "InputModel::AssociateSelectText",
+                        "InputModel::Impl::AssociateSelectText", "InputModel::OnAssociate",
+                        "BoardController::Associate",
+                        "KeyboardCallbackImpl::NotifyUpdateAssociations"
+                ),
+                new HookSection(
+                        "11. 选区同步",
+                        "保留光标和选区同步，同时关闭英文场景下联想、纠错等副作用。",
+                        false, false,
+                        "English26Layout::OnSelectionUpdated"
+                ),
+                new HookSection(
+                        "12. 空格与退格",
+                        "在空格或退格生效前，先清理引擎里隐藏的英文词态和预编辑，再执行原来的按键或上滑清除逻辑，避免需要多按一次。",
+                        false, false,
+                        "ButtonSpace::OnButtonUp", "ButtonBackspace::OnButtonDown",
+                        "ButtonBackspace::ShowUpClear", "ButtonBackspace::OnButtonUp",
+                        "Jni_DoUpClearAction", "InputBoxScreenModel::UpClear",
+                        "InputBoxTranslateModel::UpClear"
+                ),
+                new HookSection(
+                        "13. 长按与上滑字符",
+                        "完整保留长按气泡和上滑输入的原有链路；在操作结束后清理可能残留的隐藏词态。",
+                        false, false,
+                        "ButtonEnglishPushCommit::OnButtonUp", "ButtonChar::OnButtonLongPress"
+                ),
+                new HookSection(
+                        "14. 中英切换与保留组合",
+                        "离开英文模式前先清理缓冲；禁止在切换到英文时保留 composition（组合串）。",
+                        false, false,
+                        "InputModel::SetInputMode",
+                        "WindowBoardView::SetBoardType(InputMode)",
+                        "WindowBoardView::SetBoardType(InputBoardType)",
+                        "ButtonSwitchChineseEnglish::OnButtonUp",
+                        "ButtonSwitchBoard::OnButtonUp",
+                        "InputModel::SetKeepCompositionOnEnglishSwitch"
+                ),
+                new HookSection(
+                        "15. 输入视图生命周期",
+                        "在 startInputView / finishInputView 的时机控制清理动作，避免在输入视图尚未就绪时做不安全的清理。",
+                        true, false
+                ),
+        };
+    }
+
+    /** Wrap children to next line when width is insufficient. */
+    private static final class FlowLayout extends ViewGroup {
+        private final int gapH;
+        private final int gapV;
+
+        FlowLayout(Context context) {
+            super(context);
+            float d = context.getResources().getDisplayMetrics().density;
+            gapH = Math.round(8 * d);
+            gapV = Math.round(8 * d);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int width = MeasureSpec.getSize(widthMeasureSpec);
+            int x = getPaddingLeft();
+            int y = getPaddingTop();
+            int rowH = 0;
+            int limit = width - getPaddingRight();
+            for (int i = 0; i < getChildCount(); i++) {
+                View child = getChildAt(i);
+                if (child.getVisibility() == GONE) {
+                    continue;
+                }
+                int maxChildW = Math.max(0, width - getPaddingLeft() - getPaddingRight());
+                int childWSpec = MeasureSpec.makeMeasureSpec(maxChildW, MeasureSpec.AT_MOST);
+                int childHSpec = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+                child.measure(childWSpec, childHSpec);
+                int cw = child.getMeasuredWidth();
+                int ch = child.getMeasuredHeight();
+                if (x > getPaddingLeft() && x + cw > limit) {
+                    x = getPaddingLeft();
+                    y += rowH + gapV;
+                    rowH = 0;
+                }
+                x += cw + gapH;
+                rowH = Math.max(rowH, ch);
+            }
+            int height = y + rowH + getPaddingBottom();
+            setMeasuredDimension(width, resolveSize(Math.max(height, getPaddingTop() + getPaddingBottom()),
+                    heightMeasureSpec));
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            int x = getPaddingLeft();
+            int y = getPaddingTop();
+            int rowH = 0;
+            int limit = r - l - getPaddingRight();
+            for (int i = 0; i < getChildCount(); i++) {
+                View child = getChildAt(i);
+                if (child.getVisibility() == GONE) {
+                    continue;
+                }
+                int cw = child.getMeasuredWidth();
+                int ch = child.getMeasuredHeight();
+                if (x > getPaddingLeft() && x + cw > limit) {
+                    x = getPaddingLeft();
+                    y += rowH + gapV;
+                    rowH = 0;
+                }
+                child.layout(x, y, x + cw, y + ch);
+                x += cw + gapH;
+                rowH = Math.max(rowH, ch);
+            }
+        }
     }
 
     private String formatTime(long timestamp) {

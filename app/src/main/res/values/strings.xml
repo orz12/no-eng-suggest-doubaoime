@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">豆包输入法英文直输</string>
-    <string name="module_description">为豆包输入法提供英文单字符直接上屏，并阻断英文预编辑、候选与联想</string>
+    <string name="module_description">为豆包输入法提供英文单字符直接上屏，阻断英文预编辑、候选与联想；翻译面板英文框兼容直输与手势</string>
 </resources>

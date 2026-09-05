@@ -143,7 +143,8 @@ final class ProbeHooks {
                 new Class<?>[]{String.class, int.class, String.class, String.class, String.class},
                 chain -> {
                     String text = stringArg(chain, 0);
-                    if (isEnglishUi(jni) && isBulkAlnum(text)) {
+                    if (isEnglishUi(jni) && !NativeBridge.isTranslateActiveQuiet()
+                                && isBulkAlnum(text)) {
                         FileLogger.i(module, "block bulk ENG DoCommit len="
                                 + text.length() + " text=" + preview(text));
                         return null;
@@ -151,25 +152,30 @@ final class ProbeHooks {
                     return chain.proceed();
                 });
 
-        // 最后一层 composing 出口：英文绝不把 native 词态写进 InputConnection。
+        // 最后一层 composing 出口：英文直输模式下不把 native 词态写进 InputConnection。
+        // 翻译面板激活时 must 放行，否则翻译结果无法上屏且可能触发 Clear 死锁。
         hookStatic(module, jni, "UpdatePreedit", new Class<?>[]{String.class}, chain -> {
             boolean jniEng = isEnglishKeyboard(jni);
-            boolean eng = jniEng || NativeBridge.isEnglishUiQuiet();
+            boolean translate = NativeBridge.isTranslateActiveQuiet();
+            // Key-path direct remains on in translate; swallowing preedit must not.
+            boolean swallowPreedit = isEnglishUi(jni) && !translate;
             String text = stringArg(chain, 0);
             int n = UPDATE_PREEDIT_COUNT.incrementAndGet();
             if (n <= 80 || n % 10 == 0) {
                 FileLogger.i(module, "DIAG UpdatePreedit#" + n
                         + " jniEng=" + jniEng
-                        + " uiEng=" + eng
+                        + " swallow=" + swallowPreedit
+                        + " translate=" + translate
                         + " board=" + NativeBridge.getBoardTypeQuiet()
                         + " mode=" + NativeBridge.getInputModeQuiet()
                         + " len=" + (text == null ? -1 : text.length())
                         + " text=" + preview(text)
                         + " last=" + preview(sLastEngPreedit));
             }
-            if (!eng) {
+            if (!swallowPreedit) {
                 if (text != null && !text.isEmpty() && n <= 80) {
-                    FileLogger.i(module, "DIAG UpdatePreedit CN proceed composing");
+                    FileLogger.i(module, "DIAG UpdatePreedit proceed composing"
+                            + " (cn-or-translate)");
                 }
                 sLastEngPreedit = "";
                 return chain.proceed();
@@ -372,7 +378,8 @@ final class ProbeHooks {
         hookInstance(module, jni, "commitString",
                 new Class<?>[]{String.class, boolean.class, String.class}, chain -> {
                     String text = stringArg(chain, 0);
-                    if (isEnglishUi(jni) && isBulkAlnum(text)) {
+                    if (isEnglishUi(jni) && !NativeBridge.isTranslateActiveQuiet()
+                                && isBulkAlnum(text)) {
                         FileLogger.i(module, "commitString ENG block bulk len="
                                 + text.length() + " text=" + preview(text));
                         return null;
@@ -473,11 +480,16 @@ final class ProbeHooks {
         }
     }
 
-    /** Java IsEnglishKeyboard 或不可靠时，用 native boardType/mode 兜底。 */
+    /**
+     * 是否应对英文施加直上屏/吞 preedit 等干预。
+     * 翻译面板内仍为 true（避免上滑/长按变成 h(/hH）；吞 preedit 需另判 translate。
+     */
     private static boolean isEnglishUi(Class<?> jni) {
-        boolean jniEng = isEnglishKeyboard(jni);
-        boolean nativeEng = NativeBridge.isEnglishUiQuiet();
-        return jniEng || nativeEng;
+        // native 就绪时以综合闸门为准（已含翻译旁路）。
+        if (NativeBridge.isReadyQuiet()) {
+            return NativeBridge.shouldApplyEnglishDirectQuiet();
+        }
+        return isEnglishKeyboard(jni);
     }
 
     private static boolean isBulkAlnum(String text) {

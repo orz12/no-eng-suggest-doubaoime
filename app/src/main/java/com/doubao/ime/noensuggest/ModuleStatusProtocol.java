@@ -37,6 +37,15 @@ public final class ModuleStatusProtocol {
     public static final String EXTRA_LOG_HAS_MORE = "log_has_more";
     public static final String EXTRA_LOG_REQUEST_ID = "log_request_id";
     public static final String EXTRA_HOOK_BUILD = "hook_build";
+    /** 进程内实时键盘/干预摘要，多行文本。 */
+    public static final String EXTRA_RUNTIME_DETAIL = "runtime_detail";
+    public static final String EXTRA_HOOK_OK = "hook_ok";
+    public static final String EXTRA_HOOK_TOTAL = "hook_total";
+    public static final String EXTRA_HOOK_FAIL = "hook_fail";
+    public static final String EXTRA_HOOK_FAIL_NAMES = "hook_fail_names";
+    public static final String EXTRA_BEHAVIOR_OFFSET = "behavior_offset";
+    public static final String EXTRA_HOOK_SKIP_NAMES = "hook_skip_names";
+    public static final String EXTRA_HOOK_STATUS_MAP = "hook_status_map";
 
     private static final String TOKEN = "doubao-no-en-suggest-v1";
 

@@ -39,9 +39,28 @@ final class NativeBridge {
 
     static native boolean nativeIsEnglishUi();
 
+    static native boolean nativeIsTranslateActive();
+
+    static native boolean nativeShouldApplyEnglishDirect();
+
     static native int nativeGetBoardType();
 
     static native int nativeGetInputMode();
+
+    static native int nativeHookOkCount();
+
+    static native int nativeHookTotalCount();
+
+    static native int nativeHookFailCount();
+
+    static native String nativeHookFailNames();
+
+    static native long nativeBehaviorOffset();
+
+    static native String nativeHookSkipNames();
+
+    static native String nativeHookStatusMap();
+
 
     /** 请求丢弃 Native 预编辑；真正的 InputModel::Clear 只在目标 Native 回调栈执行。 */
     static void clearEnglishTypingBufferQuiet() {
@@ -87,6 +106,31 @@ final class NativeBridge {
         }
     }
 
+    /** 翻译面板激活（含 DelayRefreshResponse 调用栈）。 */
+    static boolean isTranslateActiveQuiet() {
+        if (!READY.get()) {
+            return false;
+        }
+        try {
+            return nativeIsTranslateActive();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 是否应施加英文直上屏按键路径（含翻译面板）。 */
+    static boolean shouldApplyEnglishDirectQuiet() {
+        if (!READY.get()) {
+            return false;
+        }
+        try {
+            return nativeShouldApplyEnglishDirect();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+
     static int getBoardTypeQuiet() {
         if (!READY.get()) {
             return -1;
@@ -106,6 +150,90 @@ final class NativeBridge {
             return nativeGetInputMode();
         } catch (Throwable ignored) {
             return -1;
+        }
+    }
+
+
+
+
+    static int getHookOkCountQuiet() {
+        if (!READY.get()) {
+            return 0;
+        }
+        try {
+            return nativeHookOkCount();
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    static int getHookTotalCountQuiet() {
+        if (!READY.get()) {
+            return 0;
+        }
+        try {
+            return nativeHookTotalCount();
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    static int getHookFailCountQuiet() {
+        if (!READY.get()) {
+            return 0;
+        }
+        try {
+            return nativeHookFailCount();
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    static String getHookFailNamesQuiet() {
+        if (!READY.get()) {
+            return "";
+        }
+        try {
+            String names = nativeHookFailNames();
+            return names == null ? "" : names;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+
+    static String getHookSkipNamesQuiet() {
+        if (!READY.get()) {
+            return "";
+        }
+        try {
+            String names = nativeHookSkipNames();
+            return names == null ? "" : names;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    static String getHookStatusMapQuiet() {
+        if (!READY.get()) {
+            return "";
+        }
+        try {
+            String map = nativeHookStatusMap();
+            return map == null ? "" : map;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    static long getBehaviorOffsetQuiet() {
+        if (!READY.get()) {
+            return 0L;
+        }
+        try {
+            return nativeBehaviorOffset();
+        } catch (Throwable ignored) {
+            return 0L;
         }
     }
 
@@ -176,7 +304,7 @@ final class NativeBridge {
         }
 
         // 版本目录强制换新 SO，避免 code_cache 复用旧 native
-        File dir = new File(ctx.getCodeCacheDir(), "noensuggest_native_v070");
+        File dir = new File(ctx.getCodeCacheDir(), "noensuggest_native_v077");
         if (!dir.exists() && !dir.mkdirs()) {
             throw new IllegalStateException("cannot mkdir " + dir);
         }
