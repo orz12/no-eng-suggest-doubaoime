@@ -6,7 +6,7 @@ LSPosed 模块。
 - 包名：`com.doubao.ime.noensuggest`
 - 推荐作用域：`com.bytedance.android.doubaoime`
 - 目标：英文输入下去除候选与联想（完整「单字母直上屏」）
-- 当前：`0.9.16-password-dedup`（`versionCode=55`）
+- 当前：`0.9.31-no-paste-heuristic`（`versionCode=70`）
 - 文件日志：`/sdcard/Download/DoubaoNoEnSuggest.log`
 - 日志默认关闭，可在模块应用的“日志”页启用
 

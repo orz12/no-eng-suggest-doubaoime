@@ -137,17 +137,30 @@ final class ProbeHooks {
             return;
         }
 
-        // 真正的 Java → InputConnection 最终出口。英文多字符字母数字只可能来自
-        // 候选确认或残留词态，单字符直输不受影响。
+        // 真正的 Java → InputConnection 最终出口。
+        // 工具栏剪贴板常直接调 DoCommit，不经过 CommitClipboardCand；
+        // 因此不能再「凡多字符 alnum 就拦」，只拦与残留英文词态一致的整词冲刷。
         hookStatic(module, jni, "DoCommit",
                 new Class<?>[]{String.class, int.class, String.class, String.class, String.class},
                 chain -> {
                     String text = stringArg(chain, 0);
+                    int flag = intArg(chain, 1);
+                    boolean allow = NativeBridge.isAllowDirectCommitQuiet();
                     if (isEnglishUi(jni) && !NativeBridge.isTranslateActiveQuiet()
-                                && isBulkAlnum(text)) {
+                                && shouldBlockEngBulkCommit(text, allow)) {
                         FileLogger.i(module, "block bulk ENG DoCommit len="
-                                + text.length() + " text=" + preview(text));
+                                + text.length() + " flag=" + flag
+                                + " last=" + preview(sLastEngPreedit)
+                                + " text=" + preview(text));
                         return null;
+                    }
+                    if (isEnglishUi(jni) && text != null && text.length() > 1
+                            && (allow || isBulkAlnum(text))) {
+                        FileLogger.i(module, "allow ENG DoCommit len="
+                                + text.length() + " flag=" + flag
+                                + " allowFlag=" + allow
+                                + " last=" + preview(sLastEngPreedit)
+                                + " text=" + preview(text));
                     }
                     return chain.proceed();
                 });
@@ -378,11 +391,20 @@ final class ProbeHooks {
         hookInstance(module, jni, "commitString",
                 new Class<?>[]{String.class, boolean.class, String.class}, chain -> {
                     String text = stringArg(chain, 0);
+                    boolean allow = NativeBridge.isAllowDirectCommitQuiet();
                     if (isEnglishUi(jni) && !NativeBridge.isTranslateActiveQuiet()
-                                && isBulkAlnum(text)) {
+                                && shouldBlockEngBulkCommit(text, allow)) {
                         FileLogger.i(module, "commitString ENG block bulk len="
-                                + text.length() + " text=" + preview(text));
+                                + text.length()
+                                + " last=" + preview(sLastEngPreedit)
+                                + " text=" + preview(text));
                         return null;
+                    }
+                    if (isEnglishUi(jni) && text != null && text.length() > 1
+                            && (allow || isBulkAlnum(text))) {
+                        FileLogger.i(module, "commitString ENG allow len="
+                                + text.length() + " allowFlag=" + allow
+                                + " text=" + preview(text));
                     }
                     return chain.proceed();
                 });
@@ -502,6 +524,21 @@ final class ProbeHooks {
             }
         }
         return false;
+    }
+
+    /**
+     * 英文 bulk 拦截：只拦「残留词态整词冲刷」，不拦剪贴板/外部整段粘贴。
+     * 工具栏剪贴板实测直接走 KeyboardJni.DoCommit，不会进入 CommitClipboardCand。
+     */
+    private static boolean shouldBlockEngBulkCommit(String text, boolean allowDirect) {
+        if (allowDirect || !isBulkAlnum(text)) {
+            return false;
+        }
+        String last = sLastEngPreedit;
+        if (last == null || last.isEmpty()) {
+            return false;
+        }
+        return text.equals(last);
     }
 
     private static void hookStatic(XposedModule module, Class<?> clazz, String name,

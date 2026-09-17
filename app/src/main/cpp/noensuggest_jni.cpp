@@ -38,6 +38,10 @@ static jboolean nativeShouldApplyEnglishDirect(JNIEnv *, jclass) {
     return noensuggest_should_apply_english_direct() ? JNI_TRUE : JNI_FALSE;
 }
 
+static jboolean nativeIsAllowDirectCommit(JNIEnv *, jclass) {
+    return noensuggest_is_allow_direct_commit() ? JNI_TRUE : JNI_FALSE;
+}
+
 static jint nativeGetBoardType(JNIEnv *, jclass) {
     return noensuggest_get_board_type();
 }
@@ -105,6 +109,8 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
              reinterpret_cast<void *>(nativeIsTranslateActive)},
             {"nativeShouldApplyEnglishDirect", "()Z",
              reinterpret_cast<void *>(nativeShouldApplyEnglishDirect)},
+            {"nativeIsAllowDirectCommit", "()Z",
+             reinterpret_cast<void *>(nativeIsAllowDirectCommit)},
             {"nativeGetBoardType", "()I", reinterpret_cast<void *>(nativeGetBoardType)},
                         {"nativeGetInputMode", "()I", reinterpret_cast<void *>(nativeGetInputMode)},
             {"nativeHookOkCount", "()I", reinterpret_cast<void *>(nativeHookOkCount)},

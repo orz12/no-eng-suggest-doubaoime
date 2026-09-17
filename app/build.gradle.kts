@@ -55,8 +55,8 @@ android {
         applicationId = "com.doubao.ime.noensuggest"
         minSdk = 26
         targetSdk = 35
-        versionCode = 66
-        versionName = "0.9.27-hook-tags"
+        versionCode = 70
+        versionName = "0.9.31-no-paste-heuristic"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

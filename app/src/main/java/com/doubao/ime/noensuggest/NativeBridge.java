@@ -43,6 +43,8 @@ final class NativeBridge {
 
     static native boolean nativeShouldApplyEnglishDirect();
 
+    static native boolean nativeIsAllowDirectCommit();
+
     static native int nativeGetBoardType();
 
     static native int nativeGetInputMode();
@@ -125,6 +127,18 @@ final class NativeBridge {
         }
         try {
             return nativeShouldApplyEnglishDirect();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 当前是否处于授权提交窗口（直上屏 / 剪贴板粘贴）。 */
+    static boolean isAllowDirectCommitQuiet() {
+        if (!READY.get()) {
+            return false;
+        }
+        try {
+            return nativeIsAllowDirectCommit();
         } catch (Throwable ignored) {
             return false;
         }
@@ -304,7 +318,7 @@ final class NativeBridge {
         }
 
         // 版本目录强制换新 SO，避免 code_cache 复用旧 native
-        File dir = new File(ctx.getCodeCacheDir(), "noensuggest_native_v077");
+        File dir = new File(ctx.getCodeCacheDir(), "noensuggest_native_v080");
         if (!dir.exists() && !dir.mkdirs()) {
             throw new IllegalStateException("cannot mkdir " + dir);
         }

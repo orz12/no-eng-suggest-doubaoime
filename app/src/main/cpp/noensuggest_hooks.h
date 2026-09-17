@@ -43,6 +43,12 @@ int noensuggest_is_translate_active(void);
  */
 int noensuggest_should_apply_english_direct(void);
 
+/**
+ * 当前是否处于授权提交窗口（直上屏 / 剪贴板粘贴等）。
+ * Java 侧 DoCommit/commitString 需同步查询，避免 native 已放行后 Java 再拦。
+ */
+int noensuggest_is_allow_direct_commit(void);
+
 /** 诊断：当前 GetBoardType / GetInputMode。 */
 int noensuggest_get_board_type(void);
 int noensuggest_get_input_mode(void);

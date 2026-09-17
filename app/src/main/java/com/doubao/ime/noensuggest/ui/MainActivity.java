@@ -397,9 +397,8 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         introCard.addView(sectionTitle("模块介绍"));
         TextView introduction = text(
                 "本模块面向官方豆包输入法，通过 LSPosed 在英文键盘下实现单字符直接上屏，"
-                        + "并阻断普通输入场景中的英文预编辑、候选词、联想词与切换语言时的重复提交。\n\n"
-                        + "翻译面板英文框仍支持直输与手势大写/符号，同时避免刷新路径死锁与"
-                        + "隐式词态残留。中文拼音、中文候选与中文联想保持输入法原有行为。",
+                        + "并阻断英文预编辑、候选词、联想词与切换语言时的重复提交。"
+                        + "中文拼音、中文候选与中文联想保持输入法原有行为。",
                 14f, colorPrimary, Typeface.NORMAL);
         introduction.setLineSpacing(dp(2), 1.2f);
         introCard.addView(introduction, topMargin(10));
@@ -1439,12 +1438,17 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
                         true, false
                 ),
                 new HookSection(
-                        "7. 整词与符号提交出口",
-                        "拦截未经授权的多字符整词提交；符号按受控方式单次提交，并在提交后清理残留词态。",
-                        false, false,
+                        "7. 整词、符号与剪贴板上屏",
+                        "拦截与残留英文词态一致的整词冲刷，避免候选确认把隐藏词态一次性上屏。"
+                                + "工具栏剪贴板实测直接走 Java KeyboardJni.DoCommit，"
+                                + "因此 Java 侧在无残留词态时放行整段粘贴（不依赖文本是否含标点）。"
+                                + "若走 CandidateContainerCenter::CommitClipboardCand，则打开授权提交窗口。"
+                                + "符号仍按受控方式单次提交，并在提交后清理残留词态。",
+                        true, false,
                         "InputModel::Impl::CommitString", "BoardController::CommitString",
                         "BoardController::CommitAppendSymbol", "BoardController::CommitSymbol",
-                        "KeyboardCallbackImpl::DoCommit"
+                        "KeyboardCallbackImpl::DoCommit",
+                        "CandidateContainerCenter::CommitClipboardCand"
                 ),
                 new HookSection(
                         "8. 英文候选栏",

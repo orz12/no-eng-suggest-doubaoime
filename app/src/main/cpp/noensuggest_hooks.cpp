@@ -40,7 +40,7 @@ std::atomic<int> g_last_direct_ascii{0};
 std::atomic<int64_t> g_last_direct_ascii_at_ms{0};
 /** unique-mode 源头拦截后的异常 preedit 次数，仅用于日志诊断。 */
 std::atomic<int> g_native_leak_rescue_count{0};
-/** 仅我们主动 CommitString（直上屏/长按）时放行；其它英文 alnum 提交一律拦。 */
+/** 仅我们主动 CommitString（直上屏/长按/剪贴板）时放行；其它英文 alnum 提交一律拦。 */
 std::atomic<int> g_allow_direct_commit{0};
 /**
  * 诊断闩锁：仅打日志，不参与逻辑判断（0.4.2 用它拦联想会误伤中文）。
@@ -121,6 +121,7 @@ using FnAssocRegs = int (*)(void *, void *, void *, void *, void *, void *, void
 using FnOnAssociate = void (*)(void *, int, int, int);
 using FnBoardAssociate = void (*)(void *);
 using FnDoCommit = void (*)(void *, const void *, int, const void *, const void *, const void *);
+using FnCommitClipboardCand = void (*)(void *, const void *);
 using FnInputBoxGetInstance = void *(*)();
 using FnInputBoxSetPassword = void (*)(void *, int);
 using FnInputBoxIsPassword = int (*)(void *);
@@ -224,6 +225,7 @@ void *sym_Board_CommitString = nullptr;
 void *sym_Board_CommitAppendSymbol = nullptr;
 void *sym_Board_CommitSymbol = nullptr;
 void *sym_DoCommit = nullptr;
+void *sym_CommitClipboardCand = nullptr;
 void *sym_InputModel_SetInputMode = nullptr;
 void *sym_WindowBoard_SetBoardTypeMode = nullptr;
 void *sym_WindowBoard_SetBoardTypeBoard = nullptr;
@@ -279,6 +281,7 @@ FnBoardCommitString orig_Board_CommitString = nullptr;
 FnBoardCommitAppendSymbol orig_Board_CommitAppendSymbol = nullptr;
 FnBoardCommitSymbol orig_Board_CommitSymbol = nullptr;
 FnDoCommit orig_DoCommit = nullptr;
+FnCommitClipboardCand orig_CommitClipboardCand = nullptr;
 FnSetInputMode3 orig_InputModel_SetInputMode = nullptr;
 FnSetBoardTypeMode orig_WindowBoard_SetBoardTypeMode = nullptr;
 FnSetBoardTypeBoard orig_WindowBoard_SetBoardTypeBoard = nullptr;
@@ -813,6 +816,12 @@ bool resolve_symbols() {
             "_ZN8keyboard20KeyboardCallbackImpl8DoCommitERKNSt6__ndk112basic_stringIcNS1_"
             "11char_traitsIcEENS1_9allocatorIcEEEEiS9_S9_S9_",
             true);
+    // 工具栏/候选剪贴板条目上屏入口；必须放行，否则英文 bulk 闸会吞掉粘贴。
+    sym_CommitClipboardCand = dynsym_find(
+            &idx,
+            "_ZN6center24CandidateContainerCenter19CommitClipboardCandERKNSt6__ndk112basic_"
+            "stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE",
+            false);
     sym_InputModel_SetInputMode =
             dynsym_find(&idx, "_ZN8keyboard10InputModel12SetInputModeENS_9InputModeEbb", false);
     sym_WindowBoard_SetBoardTypeMode = dynsym_find(
@@ -1120,7 +1129,8 @@ bool is_ascii_alnum(char c) {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 
-/** 英文下拦截「词态缓冲上屏」：非授权提交且含字母数字则丢弃。纯符号放行。 */
+/** 英文下拦截「词态缓冲上屏」：非授权多字符 alnum 丢弃；纯符号放行。
+ * 工具栏剪贴板实测走 Java DoCommit，由 Java 侧按残留词态判断，不依赖此处内容启发式。 */
 bool should_block_english_bulk_commit(const void *str) {
     // 翻译面板可能整词提交译文，不得按英文联想词拦截。
     if (!should_swallow_english_preedit()) {
@@ -2119,6 +2129,23 @@ void fake_DoCommit(void *self, const void *str, int flag, const void *a, const v
     }
 }
 
+/**
+ * 剪贴板历史/工具栏条目上屏：内部走 InputModel::CommitString → DoCommit。
+ * 英文 bulk 闸默认会吞多字符 alnum，这里整段授权放行。
+ */
+void fake_CommitClipboardCand(void *self, const void *str) {
+    StdStrView v = parse_std_string(str);
+    char buf[160];
+    snprintf(buf, sizeof(buf), "clipboard CommitClipboardCand len=%zu head=%.24s", v.len,
+             v.data ? v.data : "");
+    log_both(buf);
+    g_allow_direct_commit.fetch_add(1);
+    if (orig_CommitClipboardCand) {
+        orig_CommitClipboardCand(self, str);
+    }
+    g_allow_direct_commit.fetch_sub(1);
+}
+
 void fake_InputModel_SetInputMode(void *self, int mode, int a, int b) {
     int before = current_input_mode();
     if (is_english_mode(before) && !is_english_mode(mode)) {
@@ -2493,6 +2520,9 @@ extern "C" int noensuggest_install_hooks(void) {
     do_hook("KeyboardCallbackImpl::DoCommit", sym_DoCommit,
             reinterpret_cast<void *>(fake_DoCommit), reinterpret_cast<void **>(&orig_DoCommit),
             true);
+    do_hook("CandidateContainerCenter::CommitClipboardCand", sym_CommitClipboardCand,
+            reinterpret_cast<void *>(fake_CommitClipboardCand),
+            reinterpret_cast<void **>(&orig_CommitClipboardCand), false);
     do_hook("InputModel::SetInputMode", sym_InputModel_SetInputMode,
             reinterpret_cast<void *>(fake_InputModel_SetInputMode),
             reinterpret_cast<void **>(&orig_InputModel_SetInputMode), false);
@@ -2606,6 +2636,10 @@ extern "C" int noensuggest_should_apply_english_direct(void) {
         return 0;
     }
     return should_apply_english_direct() ? 1 : 0;
+}
+
+extern "C" int noensuggest_is_allow_direct_commit(void) {
+    return g_allow_direct_commit.load() > 0 ? 1 : 0;
 }
 
 extern "C" int noensuggest_get_board_type(void) {
