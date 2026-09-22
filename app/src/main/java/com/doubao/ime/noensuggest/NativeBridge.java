@@ -170,8 +170,13 @@ final class NativeBridge {
 
 
 
+    /** SO 已加载即可读 install 快照；不要求 g_ready（部分必选 hook 失败时仍要展示）。 */
+    private static boolean canReadHookStats() {
+        return LOADED.get();
+    }
+
     static int getHookOkCountQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return 0;
         }
         try {
@@ -182,7 +187,7 @@ final class NativeBridge {
     }
 
     static int getHookTotalCountQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return 0;
         }
         try {
@@ -193,7 +198,7 @@ final class NativeBridge {
     }
 
     static int getHookFailCountQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return 0;
         }
         try {
@@ -204,7 +209,7 @@ final class NativeBridge {
     }
 
     static String getHookFailNamesQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return "";
         }
         try {
@@ -217,7 +222,7 @@ final class NativeBridge {
 
 
     static String getHookSkipNamesQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return "";
         }
         try {
@@ -229,7 +234,7 @@ final class NativeBridge {
     }
 
     static String getHookStatusMapQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return "";
         }
         try {
@@ -241,7 +246,7 @@ final class NativeBridge {
     }
 
     static long getBehaviorOffsetQuiet() {
-        if (!READY.get()) {
+        if (!canReadHookStats()) {
             return 0L;
         }
         try {
@@ -252,7 +257,20 @@ final class NativeBridge {
     }
 
     static boolean isReadyQuiet() {
-        return READY.get();
+        if (READY.get()) {
+            return true;
+        }
+        if (!LOADED.get()) {
+            return false;
+        }
+        try {
+            if (nativeIsReady()) {
+                READY.set(true);
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     static void setLoggingEnabledQuiet(boolean enabled) {
@@ -284,14 +302,17 @@ final class NativeBridge {
             nativeSetLoggingEnabled(FileLogger.isEnabled());
             int rc = nativeInstall();
             boolean ready = nativeIsReady();
-            module.i("nativeInstall rc=" + rc + " ready=" + ready);
+            module.i("nativeInstall rc=" + rc + " ready=" + ready
+                    + " hooks=" + nativeHookOkCount() + "/" + nativeHookTotalCount()
+                    + " behavior=0x" + Long.toHexString(nativeBehaviorOffset()));
             if (ready) {
                 READY.set(true);
-                TargetControlBridge.reportStatus();
             } else {
                 // 允许 keyboard 再次触发时重试 install（SO 已 load）
                 module.i("native not ready, will retry install on next trigger");
             }
+            // 无论是否全部成功，都上报已安装快照，避免首页全员「未知」
+            TargetControlBridge.reportStatus();
         } catch (UnsatisfiedLinkError ule) {
             module.e("JNI missing after load, reset LOADED", ule);
             LOADED.set(false);

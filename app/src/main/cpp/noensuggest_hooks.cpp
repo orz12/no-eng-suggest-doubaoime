@@ -116,7 +116,8 @@ using FnHideTipBubble = void (*)(void *);
 using FnOnButtonUp = void (*)(void *, uint64_t);
 using FnClicked = void (*)(void *);
 using FnVoidSelf = void (*)(void *);
-using FnAssociateOuter = void (*)(void *, int, const void *);
+/** 1.4.6+：Associate(bool, string const&, bool)；旧版无末尾 bool。 */
+using FnAssociateOuter = void (*)(void *, int, const void *, int);
 using FnAssocRegs = int (*)(void *, void *, void *, void *, void *, void *, void *, void *);
 using FnOnAssociate = void (*)(void *, int, int, int);
 using FnBoardAssociate = void (*)(void *);
@@ -759,11 +760,19 @@ bool resolve_symbols() {
             "_ZN8keyboard20KeyboardCallbackImpl13UpdatePreeditERKNSt6__ndk112basic_stringIcNS1_"
             "11char_traitsIcEENS1_9allocatorIcEEEE",
             false);
+    // 1.4.6：末尾多一个 bool；旧签名作回退。
     sym_AssociateOuter = dynsym_find(
             &idx,
             "_ZN8keyboard10InputModel9AssociateEbRKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_"
-            "9allocatorIcEEEE",
+            "9allocatorIcEEEEb",
             false);
+    if (sym_AssociateOuter == nullptr) {
+        sym_AssociateOuter = dynsym_find(
+                &idx,
+                "_ZN8keyboard10InputModel9AssociateEbRKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_"
+                "9allocatorIcEEEE",
+                false);
+    }
     sym_ImplAssociate1 = dynsym_find(
             &idx,
             "_ZN8keyboard10InputModel4Impl9AssociateERKNSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_"
@@ -1828,13 +1837,13 @@ void fake_CandidateComposition_Update(void *self, int a, int b) {
     }
 }
 
-void fake_AssociateOuter(void *self, int flag, const void *str) {
+void fake_AssociateOuter(void *self, int flag, const void *str, int flag2) {
     if (should_bypass_english_associate()) {
         note_assoc_bypass("AssociateOuter");
         return;
     }
     if (orig_AssociateOuter) {
-        orig_AssociateOuter(self, flag, str);
+        orig_AssociateOuter(self, flag, str, flag2);
     }
 }
 
