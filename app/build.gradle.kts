@@ -55,8 +55,8 @@ android {
         applicationId = "com.doubao.ime.noensuggest"
         minSdk = 26
         targetSdk = 35
-        versionCode = 71
-        versionName = "0.9.32-associate-146"
+        versionCode = 77
+        versionName = "0.9.38-revert-cn-switch"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

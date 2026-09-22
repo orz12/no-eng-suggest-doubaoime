@@ -2190,7 +2190,7 @@ void fake_WindowBoard_SetBoardTypeMode(void *self, int mode, int flag) {
     log_both(buf);
     // 注意：此处 arg 未必等于 InputMode 英文=2；只记日志，不用它改行为。
     diag_note_mode_change("WindowBoard::SetBoardType", mode, is_english_mode(mode));
-    // 仅 input ready 后、且板型真正切换时清词态；InitWindow 时 g_input_ready=false
+    // 仅 input ready 后、且键盘类型真正切换时清词态；InitWindow 时 g_input_ready=false。
     if (before != 2 && after == 2) {
         discard_preedit_once("enter-eng-SetBoardType(InputMode)");
     }
@@ -2237,7 +2237,7 @@ void force_no_keep_composition(const char *reason) {
 }
 
 void fake_SetKeepComposition(void *self, int keep) {
-    // 英文切换时禁止保留中文 composing（官方 GetKeepCompositionOnEnglishSwitch）
+    // 英文切换时禁止保留中文 composing（官方 GetKeepCompositionOnEnglishSwitch）。
     if (keep && is_english_ui()) {
         static std::atomic<int> n{0};
         char buf[96];

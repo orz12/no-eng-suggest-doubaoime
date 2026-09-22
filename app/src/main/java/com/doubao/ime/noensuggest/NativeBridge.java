@@ -77,7 +77,7 @@ final class NativeBridge {
 
     /** startInputView 成功后标记就绪，允许安全 discard。 */
     static void markInputReadyQuiet(boolean ready) {
-        if (!READY.get()) {
+        if (!READY.get() && !LOADED.get()) {
             return;
         }
         try {
@@ -134,7 +134,7 @@ final class NativeBridge {
 
     /** 当前是否处于授权提交窗口（直上屏 / 剪贴板粘贴）。 */
     static boolean isAllowDirectCommitQuiet() {
-        if (!READY.get()) {
+        if (!READY.get() && !LOADED.get()) {
             return false;
         }
         try {

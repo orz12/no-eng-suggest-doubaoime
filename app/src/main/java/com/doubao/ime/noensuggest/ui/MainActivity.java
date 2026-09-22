@@ -1395,7 +1395,7 @@ public class MainActivity extends Activity implements ModuleApplication.StateLis
         return new HookSection[]{
                 new HookSection(
                         "1. 英文状态与 behavior 偏移",
-                        "读取当前输入模式（inputMode）和键盘板型（boardType），判断是否处于英文输入。"
+                        "读取当前输入模式（inputMode）和键盘类型（boardType），判断是否处于英文输入。"
                                 + "同时解析 keyboard_behavior 字段在键盘对象内存中的字节偏移。"
                                 + "behavior 是键盘内部用来记录「当前按键姿态」的状态值，"
                                 + "例如普通点按、长按弹出气泡、上滑输入等。"
